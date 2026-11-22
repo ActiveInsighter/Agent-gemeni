@@ -105,7 +105,7 @@ class JobExecutor:
 
     async def _settle_job(self, job_id: str, execution_id: str, conclusion: str) -> None:
         assert self.pb is not None
-        await self.pb.post(f"codex/jobs/{job_id}/settle", {
+        await self.pb.post(f"{self.settings.pb_executor_queue}/jobs/{job_id}/settle", {
             "executionId": execution_id,
             "conclusion": conclusion,
         }, retries=3)
@@ -198,7 +198,7 @@ class JobExecutor:
         while not self._stop_event.is_set():
             try:
                 resp = await self.client.get(
-                    f"{self.settings.pb_url}/api/anyworkflow/gemini/codex/queue",
+                    f"{self.settings.pb_url}/api/anyworkflow/gemini/{self.settings.pb_executor_queue}/queue",
                     headers={"Authorization": self.pb.token},
                     timeout=15,
                 )

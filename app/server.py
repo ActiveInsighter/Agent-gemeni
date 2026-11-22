@@ -61,6 +61,7 @@ def create_app(
             "max_concurrent_jobs": cfg.max_concurrent_jobs,
             "pending_recovery": exec_instance.pending_recovery_count(),
             "gemini_keys_configured": len(cfg.gemini_api_keys),
+            "pb_executor_queue": cfg.pb_executor_queue,
             "pb_polling_enabled": cfg.pb_poll_interval_seconds > 0,
             "pb_polling_ready": exec_instance.poll_ready,
         }

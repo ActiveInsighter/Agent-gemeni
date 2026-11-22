@@ -178,11 +178,9 @@ Remote 的“资料库”保存可复用 PDF，“收藏和模板”是独立侧
 保留通用上游 HTTP 状态与错误类别日志，方便排查其他 API 问题。
 PDF/OCR 转换流程不变；Antigravity 的独立 Interactions API 工具配置也不变。
 
-不同 Gemini 对话使用各自的 GitHub Actions concurrency group（由 request_id 区分），
-与 PDF 转换独立调度。Cloudflare 分批派发 Gemini 任务，活跃对话数无应用层上限。
-实际并发受 GitHub Runner 配额限制。
-每个 Actions Runner 的 KeyPool 仅管理当前任务，多个任务复用相同 API Key 时可能
-更早触发 Google 的项目级 RPM/RPD 或其他服务限制，请合理设置任务数量。
+生产文本任务由本机 FastAPI 轮询领取。并发由 `MAX_CONCURRENT_JOBS` 管理，PDF
+依旧独立调度。每个任务的 KeyPool 管理本次请求，共用 API Key 的任务仍受 Google
+项目级 RPM/RPD 等限制。以下 Actions 凭据配置适用于启用工作流时的部署。
 
 仓库 Actions Secret `POCKETBASE_SERVER_TOKEN` 支持直接使用 PB 超级用户令牌，具有整个数据库的服务端读写权限。
 填入后优先使用它；未填写时回退到 `GEMINI_PB_EMAIL`、`GEMINI_PB_PASSWORD`（PB 专用
@@ -197,10 +195,15 @@ PB 写入失败的回复保留在三天有效的 `gemini-text-recovery-<runId>` 
 
 ## Codex Agent 服务
 
-Codex 使用部署主机上的 FastAPI 和 Codex App Server。Gemini 与 Antigravity 继续通过
-原有 Actions 工作流执行。GPT-6.2 Sol 和 Astra 需要 Codex CLI 0.166.0 或更新版本。
-发布顺序为 AnyWorkflow Remote 的队列过滤、AnyWorkflow-workers
-的 PocketBase hooks、Codex 执行器和 RikkaHub APK。
+Codex 使用部署主机上的 FastAPI 和 Codex App Server。Gemini 与 Antigravity 使用
+同一执行器的 `PB_EXECUTOR_QUEUE=gemini` 实例，通过独立的 Linux 服务账号配置 Google
+密钥、PocketBase 服务账号和恢复目录。Codex 实例使用 `PB_EXECUTOR_QUEUE=codex`。
+GPT-6.2 Sol 和 Astra 需要 Codex CLI 0.166.0 或更新版本。
+
+迁移时先部署 AnyWorkflow-workers 的 PocketBase hooks，再部署 AnyWorkflow Remote
+的调度配置以停止新的文本 Actions 派发。启动本机 Gemini 队列轮询，验证新任务后再暂停
+`gemini-text.yml`。已有 GitHub 运行继续按原身份对账。恢复 Actions 时，先停本机
+Gemini 领取并等待本机任务结束，再启用工作流和 Cloudflare 的 Gemini Actions 派发。
 
 配置见 `.env.example`。使用专用 `aw_gemini_services` 账号访问 PocketBase。在独立的
 `CODEX_HOME` 中准备 Codex 登录态，原生启动使用 `CODEX_HOME`，Compose 使用
