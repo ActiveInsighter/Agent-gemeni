@@ -87,4 +87,3 @@ class AntigravityCliTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(denied['finishReason'], 'ERROR')
             self.assertIn('tool approval in headless mode (command)', denied['error'])
-
