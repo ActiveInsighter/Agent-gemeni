@@ -198,7 +198,8 @@ PB 写入失败的回复保留在三天有效的 `gemini-text-recovery-<runId>` 
 ## Codex Agent 服务
 
 Codex 使用部署主机上的 FastAPI 和 Codex App Server。Gemini 与 Antigravity 继续通过
-原有 Actions 工作流执行。发布顺序为 AnyWorkflow Remote 的队列过滤、AnyWorkflow-workers
+原有 Actions 工作流执行。GPT-6.2 Sol 和 Astra 需要 Codex CLI 0.166.0 或更新版本。
+发布顺序为 AnyWorkflow Remote 的队列过滤、AnyWorkflow-workers
 的 PocketBase hooks、Codex 执行器和 RikkaHub APK。
 
 配置见 `.env.example`。使用专用 `aw_gemini_services` 账号访问 PocketBase。在独立的
