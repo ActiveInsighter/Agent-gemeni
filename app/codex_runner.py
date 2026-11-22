@@ -14,6 +14,7 @@ from app.codex_app_server import (
 )
 from app.config import ServerSettings
 from gemini_agent import AgentCanceled, MAX_REPLY_BYTES, strip_image_markers
+from response_capture import snapshot
 
 
 def _extract_previous_thread_id(job: dict[str, Any], message: dict[str, Any]) -> str:
@@ -59,6 +60,11 @@ def _extract_usage(turn: dict[str, Any], params: dict[str, Any]) -> dict[str, in
     if not isinstance(raw, dict):
         return {}
     mapping = {
+        "inputTokens": "promptTokenCount",
+        "outputTokens": "candidatesTokenCount",
+        "reasoningOutputTokens": "thoughtsTokenCount",
+        "cachedInputTokens": "cachedContentTokenCount",
+        "totalTokens": "totalTokenCount",
         "input_tokens": "promptTokenCount",
         "prompt_tokens": "promptTokenCount",
         "promptTokenCount": "promptTokenCount",
@@ -126,6 +132,17 @@ async def generate_codex(
         cwd=cfg.codex_cwd,
         auto_approve=(cfg.codex_approvals_reviewer != "user"),
     ) as codex:
+        if not model or effort in {"none", "minimal"}:
+            catalog = (await codex.model_list()).get("data") or []
+            if not model:
+                model = next((entry["id"] for entry in catalog if entry.get("isDefault")), "")
+            if not model:
+                raise RuntimeError("Codex did not advertise a default model")
+            if effort in {"none", "minimal"}:
+                selected = next((entry for entry in catalog if entry.get("id") == model), {})
+                supported = [entry["reasoningEffort"] for entry in selected.get("supportedReasoningEfforts", [])]
+                if supported and effort not in supported:
+                    effort = "low" if "low" in supported else supported[0]
         thread_id = ""
         resumed = False
         if prev_thread_id:
@@ -134,6 +151,7 @@ async def generate_codex(
                     prev_thread_id,
                     model=model,
                     approvals_reviewer=cfg.codex_approvals_reviewer,
+                    sandbox=cfg.codex_sandbox,
                 )
                 resumed = bool(thread_id)
             except Exception:
@@ -147,12 +165,14 @@ async def generate_codex(
                 sandbox=cfg.codex_sandbox,
                 approvals_reviewer=cfg.codex_approvals_reviewer,
                 base_instructions=system_prompt,
-                effort=effort,
             )
 
         prompt = _build_codex_prompt(job, message, include_history=not resumed)
         if not prompt:
             raise RuntimeError("Codex prompt is empty")
+
+        if checkpoint is not None and (await checkpoint()).get("canceled"):
+            raise AgentCanceled("Codex turn canceled")
 
         turn_id = await codex.turn_start(
             thread_id,
@@ -168,7 +188,8 @@ async def generate_codex(
                 await codex.turn_interrupt(thread_id, turn_id)
                 raise AgentCanceled("Codex turn canceled")
 
-        answer_chunks: list[str] = []
+        answer_chunks: dict[str, str] = {}
+        usage: dict[str, int] = {}
         reasoning_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         step_seq = 0
@@ -201,15 +222,21 @@ async def generate_codex(
             if method == "item/agentMessage/delta":
                 delta = str(params.get("delta") or "")
                 if delta:
-                    answer_chunks.append(delta)
-                    current_answer = "".join(answer_chunks)
+                    item_id = str(params.get("itemId") or "answer")
+                    answer_chunks[item_id] = answer_chunks.get(item_id, "") + delta
+                    current_answer = answer_chunks[item_id]
                     if len(current_answer.encode("utf-8")) > MAX_REPLY_BYTES:
                         await codex.turn_interrupt(thread_id, turn_id)
                         raise RuntimeError("Codex reply exceeds 2 MiB")
                     if progress is not None:
                         progress.put("answer", "text", current_answer, status="running")
 
-            elif method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
+            elif method == "thread/tokenUsage/updated":
+                usage = _extract_usage({}, {"usage": (params.get("tokenUsage") or {}).get("last")})
+                if progress is not None:
+                    progress.usage.update(usage)
+
+            elif method == "item/reasoning/summaryTextDelta":
                 delta = str(params.get("delta") or "")
                 if delta:
                     reasoning_chunks.append(delta)
@@ -226,10 +253,6 @@ async def generate_codex(
                     if item_id:
                         item_to_step[item_id] = seq
                     tool_name = str(item.get("tool") or item.get("name") or item_type)
-                    payload_preview = json.dumps(
-                        {k: v for k, v in item.items() if k not in {"id", "type"}},
-                        ensure_ascii=False,
-                    )
                     tool_calls.append({
                         "toolName": tool_name,
                         "kind": item_type,
@@ -240,7 +263,7 @@ async def generate_codex(
                         progress.put(
                             f"step:{seq}",
                             "tool_call",
-                            payload_preview,
+                            "",
                             status="running",
                             tool_name=tool_name,
                             call_id=item_id,
@@ -252,10 +275,12 @@ async def generate_codex(
                 item = params.get("item") if isinstance(params.get("item"), dict) else {}
                 item_type = str(item.get("type") or "")
                 item_id = str(item.get("id") or "")
-                if item_type == "agentMessage" and not answer_chunks:
-                    fallback_text = _extract_item_text(item)
-                    if fallback_text:
-                        answer_chunks.append(fallback_text)
+                if item_type == "agentMessage":
+                    item_text = _extract_item_text(item)
+                    if item_text:
+                        if item_id not in answer_chunks and len(answer_chunks) == 1 and "answer" in answer_chunks:
+                            answer_chunks.clear()
+                        answer_chunks[item_id] = item_text
                 elif item_type in {"commandExecution", "fileChange", "mcpToolCall", "webSearch", "toolCall"}:
                     seq = item_to_step.get(item_id)
                     if seq is None:
@@ -270,11 +295,8 @@ async def generate_codex(
                     if progress is not None:
                         progress.put(
                             f"step:{seq}",
-                            "tool_result",
-                            json.dumps(
-                                {k: v for k, v in item.items() if k not in {"id", "type"}},
-                                ensure_ascii=False,
-                            ),
+                            "tool_call",
+                            "",
                             status="failed" if is_failed else "completed",
                             tool_name=tool_name,
                             call_id=item_id,
@@ -297,13 +319,15 @@ async def generate_codex(
                     finish_reason = status.upper()
                 break
 
-        reply = "".join(answer_chunks)
+        reply = next(reversed(answer_chunks.values()), "")
         if not reply and isinstance(final_turn.get("finalResponse"), str):
             reply = final_turn["finalResponse"]
         if not reply and not turn_error:
             turn_error = "Codex 返回空回复"
-        reasoning = "".join(reasoning_chunks)
-        usage = _extract_usage(final_turn, final_params)
+        if len(reply.encode("utf-8")) > MAX_REPLY_BYTES:
+            raise RuntimeError("Codex reply exceeds 2 MiB")
+        reasoning = "".join(reasoning_chunks).encode("utf-8")[:MAX_REPLY_BYTES].decode("utf-8", errors="ignore")
+        usage.update(_extract_usage(final_turn, final_params))
         if step_seq:
             usage["agentStepCount"] = step_seq
 
@@ -314,14 +338,11 @@ async def generate_codex(
                 progress.put("reasoning", "reasoning_summary", reasoning, status="completed")
             progress.usage.update(usage)
 
-        parts = (
-            [
-                {k: v for k, v in part.items() if k != "truncated"}
-                for part in sorted(progress.parts.values(), key=lambda p: p["sequence"])
-            ]
-            if progress is not None
-            else []
-        )
+        response_parts = [
+            {"id": key, "type": kind, "text": text}
+            for key, kind, text in (("answer", "text", reply), ("reasoning", "reasoning", reasoning))
+            if text
+        ]
 
         return {
             "reply": reply,
@@ -330,18 +351,6 @@ async def generate_codex(
             "protocol": "codex-app-server",
             "thinkingSummary": reasoning,
             "usage": usage,
-            "parts": parts,
             "toolCalls": tool_calls,
-            "providerState": {
-                "provider": "codex",
-                "threadId": thread_id,
-                "turnId": turn_id,
-            },
-            "response": {
-                "protocol": "codex-app-server",
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "model": model,
-                "metadata": {},
-            },
+            "response": snapshot("codex-app-server", response_parts, {"model": model}),
         }

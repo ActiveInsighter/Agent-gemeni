@@ -5,7 +5,6 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import itertools
-from pathlib import Path
 import re
 import time
 from typing import Any
@@ -53,19 +52,25 @@ class JobExecutor:
         self._records: dict[str, JobRecord] = {}
         self._poller_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self.poll_ready = False
+        self._recovery_lock = asyncio.Lock()
 
     async def startup(self) -> None:
         self.settings.recovery_dir.mkdir(parents=True, exist_ok=True)
         self.client = self._client_factory()
         self.pb = self._pb_factory(self.client, self.settings.pb_url)
+        await self._authenticate()
+        await self.run_recovery()
+        if self.settings.pb_poll_interval_seconds > 0:
+            self._poller_task = asyncio.create_task(self._poll_loop())
+
+    async def _authenticate(self) -> None:
+        assert self.pb is not None
         await self.pb.authenticate(
             token=self.settings.pb_token,
             email=self.settings.pb_email,
             password=self.settings.pb_password,
         )
-        await self.run_recovery()
-        if self.settings.pb_poll_interval_seconds > 0:
-            self._poller_task = asyncio.create_task(self._poll_loop())
 
     async def shutdown(self) -> None:
         self._stop_event.set()
@@ -85,10 +90,26 @@ class JobExecutor:
     async def run_recovery(self) -> int:
         if self.pb is None:
             raise RuntimeError("Executor is not initialized")
-        before = self.pending_recovery_count()
-        await self._recover(self.pb, self.settings.recovery_dir)
-        after = self.pending_recovery_count()
-        return max(0, before - after)
+        async with self._recovery_lock:
+            if self._active_tasks:
+                raise RuntimeError("Wait for active jobs before running recovery")
+            before = self.pending_recovery_count()
+            if self._recover is recover:
+                await recover(self.pb, self.settings.recovery_dir, remove_saved=True)
+            else:
+                await self._recover(self.pb, self.settings.recovery_dir)
+            for path in self.settings.recovery_dir.glob("*.execution"):
+                if path.stem not in self._active_tasks and JOB_ID_RE.fullmatch(path.stem):
+                    await self._settle_job(path.stem, path.read_text(encoding="utf-8"), "interrupted")
+            return max(0, before - self.pending_recovery_count())
+
+    async def _settle_job(self, job_id: str, execution_id: str, conclusion: str) -> None:
+        assert self.pb is not None
+        await self.pb.post(f"codex/jobs/{job_id}/settle", {
+            "executionId": execution_id,
+            "conclusion": conclusion,
+        }, retries=3)
+        (self.settings.recovery_dir / f"{job_id}.execution").unlink(missing_ok=True)
 
     def pending_recovery_count(self) -> int:
         if not self.settings.recovery_dir.exists():
@@ -106,6 +127,11 @@ class JobExecutor:
         if self.pb is None or self.client is None:
             raise RuntimeError("Executor is not initialized")
 
+        if self._recovery_lock.locked():
+            raise RuntimeError("Executor is recovering jobs")
+        if len(self._active_tasks) >= self.settings.max_concurrent_jobs:
+            raise RuntimeError("Executor is at capacity")
+        self._records.pop(job_id, None)
         execution_id = self.next_execution_id()
         record = JobRecord(job_id=job_id, execution_id=execution_id, status="queued")
         self._records[job_id] = record
@@ -118,6 +144,10 @@ class JobExecutor:
         try:
             async with self.semaphore:
                 record.status = "running"
+                ledger = self.settings.recovery_dir / f"{job_id}.execution"
+                temporary = ledger.with_suffix(".execution.tmp")
+                temporary.write_text(execution_id, encoding="utf-8")
+                temporary.replace(ledger)
                 keys = list(self.settings.gemini_api_keys)
 
                 async def pool_factory(options: dict[str, Any]):
@@ -143,15 +173,24 @@ class JobExecutor:
                 )
                 record.exit_code = code
                 record.status = "completed" if code == 0 else "failed"
+                await self._settle_job(job_id, execution_id, "success" if code == 0 else "failure")
         except asyncio.CancelledError:
             record.status = "canceled"
             raise
         except Exception as exc:
             record.status = "failed"
             record.error = str(exc)[:500]
+            if record.exit_code is None:
+                try:
+                    await self._settle_job(job_id, execution_id, "failure")
+                except Exception as settle_error:
+                    print(f"[server.executor] settle_failed job={job_id} error_type={type(settle_error).__name__}", flush=True)
         finally:
             record.finished_at = datetime.now(timezone.utc).isoformat()
             self._active_tasks.pop(job_id, None)
+            if len(self._records) > 100 + len(self._active_tasks):
+                oldest = next(key for key in self._records if key not in self._active_tasks)
+                self._records.pop(oldest)
 
     async def _poll_loop(self) -> None:
         assert self.client is not None and self.pb is not None
@@ -159,26 +198,27 @@ class JobExecutor:
         while not self._stop_event.is_set():
             try:
                 resp = await self.client.get(
-                    f"{self.settings.pb_url}/api/collections/aw_gemini_jobs/records",
+                    f"{self.settings.pb_url}/api/anyworkflow/gemini/codex/queue",
                     headers={"Authorization": self.pb.token},
-                    params={
-                        "filter": '(status="queued" || status="dispatching") && cancelRequested=false',
-                        "sort": "created",
-                        "perPage": 20,
-                        "fields": "id,status",
-                    },
                     timeout=15,
                 )
-                if resp.status_code == 200:
-                    items = resp.json().get("items") or []
-                    for item in items:
-                        jid = str(item.get("id") or "").strip()
-                        if JOB_ID_RE.fullmatch(jid) and jid not in self._active_tasks:
-                            self.submit_job(jid)
+                if resp.status_code in {401, 403} and self.settings.pb_email and not self.settings.pb_token:
+                    await self._authenticate()
+                resp.raise_for_status()
+                items = resp.json()["items"]
+                self.poll_ready = True
+                for item in items:
+                    if self._recovery_lock.locked() or len(self._active_tasks) >= self.settings.max_concurrent_jobs:
+                        break
+                    jid = str(item.get("id") or "")
+                    if JOB_ID_RE.fullmatch(jid) and jid not in self._active_tasks:
+                        self.submit_job(jid)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                print(f"[server.poller] poll_error error_type={type(exc).__name__}", flush=True)
+                self.poll_ready = False
+                code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                print(f"[server.poller] poll_error error_type={type(exc).__name__} status={code}", flush=True)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
             except asyncio.TimeoutError:

@@ -55,7 +55,7 @@ class ServerSettings:
     codex_bin: str = "codex"
     codex_cwd: str = "."
     codex_sandbox: str = "workspace-write"
-    codex_approvals_reviewer: str = "auto_review"
+    codex_approvals_reviewer: str = "user"
     codex_default_model: str = ""
     codex_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
@@ -74,9 +74,9 @@ class ServerSettings:
         sandbox = (os.environ.get("CODEX_SANDBOX", "workspace-write") or "workspace-write").strip()
         if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
             sandbox = "workspace-write"
-        reviewer = (os.environ.get("CODEX_APPROVALS_REVIEWER", "auto_review") or "auto_review").strip()
-        if reviewer not in {"auto_review", "guardian", "user"}:
-            reviewer = "auto_review"
+        reviewer = (os.environ.get("CODEX_APPROVALS_REVIEWER", "user") or "user").strip()
+        if reviewer not in {"auto_review", "guardian_subagent", "user"}:
+            reviewer = "user"
         return cls(
             pb_url=pb_url,
             pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),

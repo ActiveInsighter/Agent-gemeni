@@ -8,8 +8,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      # Mount host Codex CLI login (~/.codex/auth.json) and session rollouts
-      - ${HOME}/.codex:/root/.codex
+      - ${CODEX_AUTH_DIR:?Set CODEX_AUTH_DIR to the dedicated Codex auth directory}:/root/.codex
       # Persist recovery files across restarts
       - ./data/recovery:/data/recovery
       # Optional workspace directory for Codex file/command execution

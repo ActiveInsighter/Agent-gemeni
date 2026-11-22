@@ -148,6 +148,7 @@ class CodexAndServerTests(unittest.TestCase):
                 settings = ServerSettings(
                     pb_url="http://127.0.0.1:8090",
                     codex_cwd=tmp,
+                    codex_approvals_reviewer="auto_review",
                     recovery_dir=Path(tmp) / "rec",
                 )
                 result = await generate_codex(
@@ -168,7 +169,7 @@ class CodexAndServerTests(unittest.TestCase):
                 self.assertEqual(result["thinkingSummary"], "Thinking...")
                 self.assertEqual(result["usage"]["totalTokenCount"], 15)
                 self.assertEqual(result["usage"]["agentStepCount"], 1)
-                self.assertEqual(result["providerState"]["threadId"], "thr_test_1")
+                self.assertEqual(result["response"]["version"], 1)
                 self.assertTrue(any(isinstance(c, dict) and c.get("threadId") == "thr_test_1" for c in checkpoints))
 
         asyncio.run(scenario())
@@ -188,6 +189,7 @@ class CodexAndServerTests(unittest.TestCase):
                 settings = ServerSettings(
                     pb_url="http://127.0.0.1:8090",
                     codex_cwd=tmp,
+                    codex_approvals_reviewer="auto_review",
                     recovery_dir=Path(tmp) / "rec",
                 )
 

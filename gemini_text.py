@@ -40,7 +40,7 @@ TOKEN_FIELDS = {
 }
 
 
-def log_result(log, result):
+def log_result(log, result, *, include_reply=True):
     """Log the answer once, before persistence; never dump prompts or tool output."""
     usage = result.get('usage') or {}
     # Redact the whole reply before chunking, including credentials spanning chunks.
@@ -61,9 +61,10 @@ def log_result(log, result):
     for tc in (result.get('toolCalls') or [])[:30]:
         log.emit('tool_summary', tool_name=tc.get('toolName', ''), kind=tc.get('kind', ''),
                  status=tc.get('status', ''), call_id=tc.get('callId', ''))
-    for index, text in enumerate(parts, 1):
-        # JSON keeps arbitrary model text from becoming GitHub workflow commands.
-        log.emit('reply', part=index, parts=len(parts), text=text)
+    if include_reply:
+        for index, text in enumerate(parts, 1):
+            # JSON keeps arbitrary model text from becoming GitHub workflow commands.
+            log.emit('reply', part=index, parts=len(parts), text=text)
 
 
 class GeminiRequestError(RuntimeError):
@@ -444,7 +445,8 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     thinking_override = normalize_thinking_level(os.environ.get("GEMINI_THINKING_LEVEL"))
     if thinking_override and thinking_override not in {'auto', *_GEMINI_25_BUDGETS}:
         raise RuntimeError('Invalid Gemini thinking level override')
-    job = await pb.post(f"{path}/claim", identity, retries=3)
+    claim = {**identity, "selfHosted": True} if server_settings is not None else identity
+    job = await pb.post(f"{path}/claim", claim, retries=3)
     options = job.setdefault("options", {})
     options.setdefault("concurrency", 5)
     options.setdefault("maxOutputTokens", 8192)
@@ -458,6 +460,8 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     if thinking_override:
         options['thinkingLevel'] = thinking_override
     codex = is_codex(job['model'])
+    if codex and server_settings is None:
+        raise RuntimeError('Codex jobs require the self-hosted executor')
     antigravity = is_antigravity(job['model'])
     pool = None if codex else await pool_factory(options)
     pool_keys = pool.keys if pool is not None else ()
@@ -561,7 +565,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                 if timing is not None:
                     timing.mark_completed(final_status)
                 usages.append(result.get('usage') or {})
-                log_result(log, result)
+                log_result(log, result, include_reply=not codex)
                 stage = 'recovery_write'
                 execution_meta = {
                     'startedAt': started_at, 'finishedAt': datetime.now(timezone.utc).isoformat(),
@@ -626,7 +630,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     return 2 if failures else 0
 
 
-async def recover(pb, directory: Path):
+async def recover(pb, directory: Path, *, remove_saved=False):
     """Flush recovery artifacts using their original identity; never generate text."""
     for path in sorted(directory.glob('*.progress.json')):
         data = json.loads(path.read_text(encoding='utf-8'))
@@ -651,6 +655,9 @@ async def recover(pb, directory: Path):
         if not all(re.fullmatch(r'[a-z0-9]{15}', data.get(key, '')) for key in ('jobId', 'messageId')):
             raise RuntimeError('Invalid recovery artifact identity')
         await pb.post(f"jobs/{data['jobId']}/messages/{data['messageId']}/complete", data['result'], retries=5)
+        if remove_saved:
+            (directory / f"{data['messageId']}.progress.json").unlink(missing_ok=True)
+            path.unlink()
         print(f"[gemini] recovered message={data['messageId']}", flush=True)
 
 

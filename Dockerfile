@@ -3,13 +3,15 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+ARG CODEX_VERSION=0.165.0
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     nodejs \
     npm \
     git \
-    && npm install -g @openai/codex \
+    && npm install -g "@openai/codex@${CODEX_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

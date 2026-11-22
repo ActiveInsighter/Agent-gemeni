@@ -195,6 +195,20 @@ PB 写入失败的回复保留在三天有效的 `gemini-text-recovery-<runId>` 
 解压后设置专用 PB 凭据及 URL，运行 `python gemini_text.py --recover-dir ./recovery`，
 只重试保存，不再次生成。传输超时、失去发送许可和新的 GitHub run attempt 不自动重复发送。
 
+## Codex Agent 服务
+
+Codex 使用部署主机上的 FastAPI 和 Codex App Server。Gemini 与 Antigravity 继续通过
+原有 Actions 工作流执行。发布顺序为 AnyWorkflow Remote 的队列过滤、AnyWorkflow-workers
+的 PocketBase hooks、Codex 执行器和 RikkaHub APK。
+
+配置见 `.env.example`。使用专用 `aw_gemini_services` 账号访问 PocketBase。在独立的
+`CODEX_HOME` 中准备 Codex 登录态，原生启动使用 `CODEX_HOME`，Compose 使用
+`CODEX_AUTH_DIR` 指定挂载目录。每个恢复目录只运行一个 Uvicorn worker。启用轮询后，
+`/health` 中的 `pb_polling_ready` 应为 true，`/codex/status` 应返回账号类型和可用模型。
+
+自建服务在任务结束前保存结果以便重启补写。对已领取但没有可补写回复的任务，重启时按
+原执行身份结束该任务。后续消息可使用 PocketBase 保存的对话上下文。
+
 ## Antigravity Agent 消息
 
 `gemini_text.py` 对 `Antigravity`（大小写不敏感）和 `antigravity-*` 使用

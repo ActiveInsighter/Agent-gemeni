@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -104,7 +105,11 @@ class CodexAppServerClient:
         self._closed = False
 
     async def __aenter__(self) -> "CodexAppServerClient":
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -122,6 +127,9 @@ class CodexAppServerClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd_path),
+            env={key: value for key, value in os.environ.items()
+                 if key in {"PATH", "HOME", "CODEX_HOME", "LANG", "TERM", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+                 or key.startswith("LC_")},
             limit=16 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_stdout_loop())
@@ -305,23 +313,19 @@ class CodexAppServerClient:
         model: str = "",
         cwd: str = "",
         sandbox: str = "workspace-write",
-        approvals_reviewer: str = "auto_review",
+        approvals_reviewer: str = "user",
         base_instructions: str = "",
-        effort: str | None = None,
     ) -> str:
         params: dict[str, Any] = {
             "cwd": cwd or self.cwd,
-            "sandboxPolicy": {"type": "workspaceWrite"} if sandbox == "workspace-write" else (
-                {"type": "readOnly"} if sandbox == "read-only" else {"type": "dangerFullAccess"}
-            ),
+            "sandbox": sandbox,
+            "approvalPolicy": "on-request" if self.auto_approve else "never",
             "approvalsReviewer": approvals_reviewer,
         }
         if model:
             params["model"] = model
         if base_instructions:
             params["baseInstructions"] = base_instructions
-        if effort:
-            params["effort"] = effort
         result = await self.request("thread/start", params, timeout=30)
         thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
         thread_id = str(result.get("threadId") or thread.get("id") or "").strip()
@@ -335,8 +339,14 @@ class CodexAppServerClient:
         *,
         model: str = "",
         approvals_reviewer: str = "",
+        sandbox: str = "workspace-write",
     ) -> str:
-        params: dict[str, Any] = {"threadId": thread_id}
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "cwd": self.cwd,
+            "sandbox": sandbox,
+            "approvalPolicy": "on-request" if self.auto_approve else "never",
+        }
         if model:
             params["model"] = model
         if approvals_reviewer:
@@ -366,7 +376,10 @@ class CodexAppServerClient:
             params["outputSchema"] = output_schema
         result = await self.request("turn/start", params, timeout=30)
         turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
-        return str(result.get("turnId") or turn.get("id") or "").strip()
+        turn_id = str(result.get("turnId") or turn.get("id") or "").strip()
+        if not turn_id:
+            raise RuntimeError("Codex turn/start did not return a turnId")
+        return turn_id
 
     async def turn_interrupt(self, thread_id: str, turn_id: str = "") -> dict[str, Any]:
         params: dict[str, Any] = {"threadId": thread_id}

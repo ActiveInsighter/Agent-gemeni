@@ -62,13 +62,14 @@ def create_app(
             "pending_recovery": exec_instance.pending_recovery_count(),
             "gemini_keys_configured": len(cfg.gemini_api_keys),
             "pb_polling_enabled": cfg.pb_poll_interval_seconds > 0,
+            "pb_polling_ready": exec_instance.poll_ready,
         }
 
     @app.get("/codex/status", dependencies=[Depends(require_auth)])
     async def codex_status() -> dict[str, Any]:
         try:
             async with CodexAppServerClient(codex_bin=cfg.codex_bin, cwd=cfg.codex_cwd) as codex:
-                account = await codex.account_read()
+                account = (await codex.account_read()).get("account") or {}
                 models_resp = await codex.model_list()
                 raw_models = models_resp.get("models") or models_resp.get("data") or []
                 model_ids = [
@@ -79,7 +80,7 @@ def create_app(
                 return {
                     "available": True,
                     "authenticated": bool(account),
-                    "account_type": account.get("authMode") or account.get("type") or "configured",
+                    "account_type": account.get("type"),
                     "models": model_ids,
                 }
         except Exception as exc:
@@ -100,6 +101,8 @@ def create_app(
             record, created = exec_instance.submit_job(payload.job_id)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {
             "accepted": True,
             "deduplicated": not created,
@@ -114,7 +117,10 @@ def create_app(
 
     @app.post("/internal/recover", dependencies=[Depends(require_auth)])
     async def trigger_recover() -> dict[str, Any]:
-        flushed = await exec_instance.run_recovery()
+        try:
+            flushed = await exec_instance.run_recovery()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {
             "flushed": flushed,
             "pending_recovery": exec_instance.pending_recovery_count(),
