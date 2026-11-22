@@ -226,10 +226,18 @@ async def generate_codex(
 
             else:
                 try:
-                    timeline.consume(method, params)
+                    first_tool_output = timeline.consume(method, params)
                 except ValueError:
                     await codex.turn_interrupt(thread_id, turn_id)
                     raise
+                if first_tool_output and progress is not None:
+                    # Some versions send the first delta immediately before
+                    # item/completed. Upload it while the card is still live.
+                    try:
+                        await asyncio.wait_for(progress.flush(), timeout=1.5)
+                    except Exception:
+                        # Any outstanding batch can still be retried by the pump.
+                        pass
 
         reply = timeline.answer()
         if not reply and isinstance(final_turn.get("finalResponse"), str):

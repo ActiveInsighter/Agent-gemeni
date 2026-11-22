@@ -512,7 +512,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                         run_auxiliary(maybe_generate_title(client, fast_pool, pb, job, message, endpoint=endpoint, identity=identity))
                         summary = AgentSummaryWorker(client, fast_pool, pb, job, message, progress, endpoint=endpoint, identity=identity)
                         run_auxiliary(summary.run(ended))
-                progress_task = asyncio.create_task(progress.pump())
+                progress_task = asyncio.create_task(progress.pump(interval=1 if codex else 5))
                 stage = 'generation'
                 try:
                     if antigravity or codex:

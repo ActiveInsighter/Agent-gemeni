@@ -75,6 +75,7 @@ class CodexTimeline:
                 if kind != 'agentMessage' and len(text) > 64000:
                     delta['_truncated'] = True
             self.update({'id': item_id, 'type': kind, **delta})
+            return field == 'aggregatedOutput' and not current.get(field)
 
     def update(self, item, *, completed=False):
         kind, item_id = item.get('type'), item.get('id')

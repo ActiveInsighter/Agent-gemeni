@@ -330,9 +330,9 @@ class MessageProgress:
                 keys = sorted(self.dirty, key=lambda key: self.parts[key]['sequence'])
                 if not keys: break
 
-    async def pump(self):
+    async def pump(self, *, interval=5):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(interval)
             try:
                 # A quiet agent still needs a real executor heartbeat. Scheduler
                 # reconciliation updates the job timestamp without runner contact.
