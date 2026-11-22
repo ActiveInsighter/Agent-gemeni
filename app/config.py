@@ -54,11 +54,16 @@ class ServerSettings:
     pb_poll_interval_seconds: float = 0.0
     pb_executor_queue: str = "codex"
     codex_bin: str = "codex"
-    codex_cwd: str = "."
+    codex_cwd: str = "work/codex/workspaces"
     codex_sandbox: str = "workspace-write"
     codex_approvals_reviewer: str = "user"
     codex_default_model: str = ""
     codex_turn_timeout_seconds: int = 1800
+    agy_bin: str = "agy"
+    agy_cwd: str = "work/antigravity-cli/workspaces"
+    agy_default_model: str = ""
+    agy_api_key: str = ""
+    agy_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
 
     @classmethod
@@ -96,10 +101,15 @@ class ServerSettings:
             pb_poll_interval_seconds=_parse_float(os.environ.get("PB_POLL_INTERVAL_SECONDS"), 0.0, minimum=0.0),
             pb_executor_queue=queue,
             codex_bin=os.environ.get("CODEX_BIN", "codex").strip() or "codex",
-            codex_cwd=os.environ.get("CODEX_CWD", ".").strip() or ".",
+            codex_cwd=os.environ.get("CODEX_CWD", "").strip() or "work/codex/workspaces",
             codex_sandbox=sandbox,
             codex_approvals_reviewer=reviewer,
             codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "").strip(),
             codex_turn_timeout_seconds=_parse_int(os.environ.get("CODEX_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            agy_bin=os.environ.get("AGY_BIN", "").strip() or "agy",
+            agy_cwd=os.environ.get("AGY_CWD", "").strip() or "work/antigravity-cli/workspaces",
+            agy_default_model=os.environ.get("AGY_DEFAULT_MODEL", "").strip(),
+            agy_api_key=os.environ.get("AGY_GEMINI_API_KEY", "").strip(),
+            agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
         )

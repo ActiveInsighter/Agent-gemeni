@@ -285,6 +285,12 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
     if is_codex(job['model']):
         from app.codex_runner import generate_codex
         return await generate_codex(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
+    from app.native_sessions import is_antigravity_cli
+    if is_antigravity_cli(job['model']):
+        from app.antigravity_cli import generate_antigravity_cli
+        if server_settings is None:
+            raise RuntimeError('Antigravity CLI jobs require the self-hosted executor')
+        return await generate_antigravity_cli(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
     if is_antigravity(job['model']):
         if checkpoint is None:
             raise RuntimeError('Agent requires durable execution state')
@@ -421,6 +427,7 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
 
 async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work_dir: Path, *, fast_pool_factory=None, server_settings=None, timing_basis: str = 'Actions runner wall clock'):
     from app.codex_app_server import is_codex
+    from app.native_sessions import ANTIGRAVITY_CLI, is_antigravity_cli
     path = f"jobs/{job_id}"
     identity = {"executionId": execution_id}
     model_override = os.environ.get("GEMINI_MODEL", "").strip().removeprefix('models/')
@@ -447,11 +454,15 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     if thinking_override:
         options['thinkingLevel'] = thinking_override
     codex = is_codex(job['model'])
-    if codex and server_settings is None:
-        raise RuntimeError('Codex jobs require the self-hosted executor')
+    agy = is_antigravity_cli(job['model'])
+    native = codex or agy
+    if native and server_settings is None:
+        raise RuntimeError('CLI jobs require the self-hosted executor')
     antigravity = is_antigravity(job['model'])
-    pool = None if codex else await pool_factory(options)
+    pool = None if native else await pool_factory(options)
     pool_keys = pool.keys if pool is not None else ()
+    if agy:
+        pool_keys = (server_settings.agy_api_key,) if server_settings.agy_api_key else server_settings.gemini_api_keys[:1]
     fast_pool = None
     auxiliary_tasks = set()
     if fast_pool_factory is not None and antigravity:
@@ -469,7 +480,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                 print(f'[agent.fast] task_failed error_type={type(task.exception()).__name__}', flush=True)
         task.add_done_callback(done)
     job_log = AgentTrace(job=job_id, secrets=pool_keys, prefix='[gemini]')
-    protocol = 'codex-app-server' if codex else 'interactions' if antigravity else 'generateContent'
+    protocol = 'codex-app-server' if codex else ANTIGRAVITY_CLI if agy else 'interactions' if antigravity else 'generateContent'
     job_log.emit('job_started', model=job['model'], protocol=protocol,
                  segments=len(job['messages']), concurrency=options['concurrency'])
     queue = asyncio.Queue()
@@ -502,7 +513,9 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                 log.emit('segment_started', model=job['model'], protocol=protocol, message_id=message['id'])
                 async def upload_progress(body):
                     return await pb.post(f"{endpoint}/progress", body, retries=2)
-                if antigravity or codex:
+                if native:
+                    message = {**message, 'previousProviderState': permit.get('previousProviderState')}
+                if antigravity or native:
                     timing = AgentTimingTracker(t0=begun, submitted_at=job.get('created'))
                 progress = MessageProgress(secrets=pool_keys, post=upload_progress, identity=identity,
                     target=work_dir / f"{message['id']}.progress.json", job_id=job_id, message_id=message['id'], timing=timing)
@@ -512,10 +525,10 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                         run_auxiliary(maybe_generate_title(client, fast_pool, pb, job, message, endpoint=endpoint, identity=identity))
                         summary = AgentSummaryWorker(client, fast_pool, pb, job, message, progress, endpoint=endpoint, identity=identity)
                         run_auxiliary(summary.run(ended))
-                progress_task = asyncio.create_task(progress.pump(interval=1 if codex else 5))
+                progress_task = asyncio.create_task(progress.pump(interval=1 if native else 5))
                 stage = 'generation'
                 try:
-                    if antigravity or codex:
+                    if antigravity or native:
                         async def checkpoint(state=None):
                             return await pb.checkpoint(f"{endpoint}/checkpoint", identity, state)
                         result = await generate(client, pool, job, message, checkpoint=checkpoint, progress=progress, pb=pb, timing=timing, server_settings=server_settings)
@@ -527,7 +540,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                     log.emit('segment_canceled')
                     continue
                 except Exception as error:
-                    if antigravity or codex:
+                    if antigravity or native:
                         try:
                             stopped = (await checkpoint()).get('canceled', False)
                         except Exception as check_error:
