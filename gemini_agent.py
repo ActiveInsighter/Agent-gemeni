@@ -372,6 +372,10 @@ async def request_json(client, method, url, key, payload=None, *, api_revision=N
             data = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise RuntimeError(f'Agent 返回非 JSON 响应（HTTP {response.status_code}）') from None
+        if not isinstance(data, dict):
+            if response.is_success:
+                raise RuntimeError(f'Agent 返回无效 JSON 对象（HTTP {response.status_code}）')
+            data = {}
         return response.status_code, response.headers, data
 
 

@@ -446,6 +446,18 @@ class AgentTransportTests(unittest.IsolatedAsyncioTestCase):
                 await generate_agent(client, KeyPool(['fixture-secret'], rpm_per_key=1e6, rpd_per_key=100), job(), {}, checkpoint=checkpoint)
         self.assertNotIn('fixture-secret', str(error.exception))
 
+    async def test_array_error_preserves_http_status(self):
+        async def checkpoint(update=None):
+            return {'state': {}, 'canceled': False}
+
+        async def outbound(request):
+            return httpx.Response(429, json=[{'message': 'upstream rate limit'}])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(outbound)) as client:
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 429'):
+                await generate_agent(client, KeyPool(['fixture-secret'], rpm_per_key=1e6, rpd_per_key=100),
+                                     job(), {}, checkpoint=checkpoint)
+
     async def test_zero_free_tier_quota_explains_account_requirement(self):
         async def checkpoint(update=None): return {'state': {}, 'canceled': False}
         async def outbound(request):
