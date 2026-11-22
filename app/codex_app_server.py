@@ -343,6 +343,7 @@ class CodexAppServerClient:
     ) -> str:
         params: dict[str, Any] = {
             "threadId": thread_id,
+            "excludeTurns": True,
             "cwd": self.cwd,
             "sandbox": sandbox,
             "approvalPolicy": "on-request" if self.auto_approve else "never",
@@ -353,7 +354,10 @@ class CodexAppServerClient:
             params["approvalsReviewer"] = approvals_reviewer
         result = await self.request("thread/resume", params, timeout=30)
         thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
-        return str(result.get("threadId") or thread.get("id") or thread_id).strip()
+        resumed = str(result.get("threadId") or thread.get("id") or "").strip()
+        if resumed != thread_id:
+            raise RuntimeError("Codex did not resume the requested thread")
+        return resumed
 
     async def turn_start(
         self,

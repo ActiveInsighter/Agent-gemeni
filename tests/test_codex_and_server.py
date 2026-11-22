@@ -177,6 +177,36 @@ class CodexAndServerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_resumes_the_permitted_thread_in_its_existing_workspace(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "fake_codex.py"
+                script.write_text(FAKE_CODEX_SCRIPT, encoding="utf-8")
+                calls = []
+
+                class RecordingClient(FakeScriptClient):
+                    async def request(self, method, params=None, **kwargs):
+                        calls.append((method, params or {}))
+                        return await super().request(method, params, **kwargs)
+
+                settings = ServerSettings(pb_url="http://127.0.0.1:8090", codex_cwd=tmp,
+                                          codex_approvals_reviewer="auto_review")
+                state = {"provider": "codex", "threadId": "recorded-thread", "workspaceId": "a" * 15}
+                result = await generate_codex({
+                    "model": "Codex", "prompt": "Continue", "history": [{"role": "user", "text": "previous message"}],
+                    "options": {"agent": {"model": "gpt-5.3-codex"}},
+                }, {"id": "b" * 15, "previousProviderState": state}, settings=settings,
+                    client_factory=lambda **kw: RecordingClient(script, **kw))
+                self.assertEqual(result["reply"], "Hello from Codex")
+                methods = dict(calls)
+                self.assertNotIn("thread/start", methods)
+                self.assertEqual(methods["thread/resume"]["threadId"], state["threadId"])
+                self.assertEqual(methods["thread/resume"]["cwd"], str(Path(tmp) / state["workspaceId"]))
+                self.assertEqual(methods["turn/start"]["threadId"], state["threadId"])
+                self.assertEqual(methods["turn/start"]["input"], [{"type": "text", "text": "Continue"}])
+
+        asyncio.run(scenario())
+
     def test_run_job_routes_codex_without_gemini_keys(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
