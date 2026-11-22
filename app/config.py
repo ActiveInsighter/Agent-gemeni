@@ -52,6 +52,7 @@ class ServerSettings:
     max_concurrent_jobs: int = 8
     recovery_dir: Path = Path("work/gemini/recovery")
     pb_poll_interval_seconds: float = 0.0
+    pb_executor_queue: str = "codex"
     codex_bin: str = "codex"
     codex_cwd: str = "."
     codex_sandbox: str = "workspace-write"
@@ -77,6 +78,11 @@ class ServerSettings:
         reviewer = (os.environ.get("CODEX_APPROVALS_REVIEWER", "user") or "user").strip()
         if reviewer not in {"auto_review", "guardian_subagent", "user"}:
             reviewer = "user"
+        queue = os.environ.get("PB_EXECUTOR_QUEUE", "codex").strip()
+        if queue not in {"codex", "gemini"}:
+            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex or gemini")
+        if queue == "gemini" and not keys:
+            raise RuntimeError("GEMINI_API_KEYS is required for the Gemini queue")
         return cls(
             pb_url=pb_url,
             pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),
@@ -88,6 +94,7 @@ class ServerSettings:
             max_concurrent_jobs=_parse_int(os.environ.get("MAX_CONCURRENT_JOBS"), 8, minimum=1),
             recovery_dir=Path(os.environ.get("RECOVERY_DIR", "work/gemini/recovery")),
             pb_poll_interval_seconds=_parse_float(os.environ.get("PB_POLL_INTERVAL_SECONDS"), 0.0, minimum=0.0),
+            pb_executor_queue=queue,
             codex_bin=os.environ.get("CODEX_BIN", "codex").strip() or "codex",
             codex_cwd=os.environ.get("CODEX_CWD", ".").strip() or ".",
             codex_sandbox=sandbox,

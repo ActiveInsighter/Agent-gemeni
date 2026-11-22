@@ -445,7 +445,9 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     thinking_override = normalize_thinking_level(os.environ.get("GEMINI_THINKING_LEVEL"))
     if thinking_override and thinking_override not in {'auto', *_GEMINI_25_BUDGETS}:
         raise RuntimeError('Invalid Gemini thinking level override')
-    claim = {**identity, "selfHosted": True} if server_settings is not None else identity
+    claim = identity if server_settings is None else {
+        **identity, "selfHosted": True, "queue": server_settings.pb_executor_queue,
+    }
     job = await pb.post(f"{path}/claim", claim, retries=3)
     options = job.setdefault("options", {})
     options.setdefault("concurrency", 5)
@@ -565,7 +567,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                 if timing is not None:
                     timing.mark_completed(final_status)
                 usages.append(result.get('usage') or {})
-                log_result(log, result, include_reply=not codex)
+                log_result(log, result, include_reply=server_settings is None)
                 stage = 'recovery_write'
                 execution_meta = {
                     'startedAt': started_at, 'finishedAt': datetime.now(timezone.utc).isoformat(),
