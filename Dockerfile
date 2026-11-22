@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-ARG CODEX_VERSION=0.165.0
+ARG CODEX_VERSION=0.171.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
