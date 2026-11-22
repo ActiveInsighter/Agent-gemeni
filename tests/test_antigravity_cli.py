@@ -29,6 +29,13 @@ def emit(event):
     print(json.dumps(event), flush=True)
 
 emit({'event': 'init', 'conversation_id': 'session-1'})
+if 'blocked' in contents:
+    emit({'event': 'result', 'result': {
+        'conversation_id': 'session-1', 'response': '', 'status': 'SUCCESS',
+        'denied_actions': [{'action': 'command', 'display_name': 'Bash'}],
+    }})
+    assert sys.stdin.readline() == ''
+    sys.exit(0)
 emit({'event': 'step_update', 'step_update': {
     'step_index': 1, 'step_type': 'tool', 'state': 'DONE', 'tool_name': 'list_dir',
     'tool_info': {'parameters': {'path': '.'}, 'output': 'session.txt'},
@@ -75,3 +82,9 @@ class AntigravityCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved[0], saved[1])
             self.assertTrue((root / 'workspaces' / first['id'] / 'session.txt').is_file())
             self.assertFalse((root / 'workspaces' / ('b' * 15)).exists())
+            denied = await generate_antigravity_cli(
+                {**job, 'prompt': 'blocked'}, {'id': 'c' * 15}, **options,
+            )
+            self.assertEqual(denied['finishReason'], 'ERROR')
+            self.assertIn('tool approval in headless mode (command)', denied['error'])
+

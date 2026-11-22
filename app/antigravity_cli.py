@@ -119,7 +119,16 @@ async def generate_antigravity_cli(job, message, *, checkpoint, progress, settin
             raise RuntimeError('Antigravity CLI reply exceeds 2 MiB')
         error = ''
         if code or status != 'SUCCESS' or not reply:
-            error = str(result.get('error') or f'Antigravity CLI ended with {status} (exit {code}, empty response)').replace(key, '[REDACTED]')[:1800]
+            fallback = f'Antigravity CLI ended with {status} (exit {code})'
+            if not reply and result.get('denied_actions'):
+                actions = [str(item.get('action')) for item in result['denied_actions']
+                           if isinstance(item, dict) and item.get('action')]
+                fallback = 'Antigravity CLI could not get tool approval in headless mode'
+                if actions:
+                    fallback += ' (' + ', '.join(dict.fromkeys(actions)) + ')'
+            elif not reply:
+                fallback += ': empty response'
+            error = str(result.get('error') or fallback).replace(key, '[REDACTED]')[:1800]
         if reply and not any(part['type'] == 'text' for part in parts.values()):
             parts['answer'] = {'type': 'text', 'text': reply}
         # The result envelope includes earlier turns when using --conversation.
@@ -173,7 +182,7 @@ def consume_step(parts, progress, step, key):
     if type(index) is not int or not 0 <= index < MAX_PARTS:
         return
     step_type = step.get('step_type')
-    status = 'completed' if step.get('state') == 'DONE' else 'running'
+    status = {'DONE': 'completed', 'ERROR': 'failed'}.get(step.get('state'), 'running')
     current = parts.get(index, {})
     if step_type == 'agent_response':
         text = current.get('text', '') + str(step.get('text_delta') or '')
