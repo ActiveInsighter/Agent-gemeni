@@ -13,6 +13,7 @@ import re
 import time
 
 from agent_trace import AgentTrace, TERMINAL
+from agent_timeline import bounded_part, citations, tool_part, wire_row
 from response_capture import sanitize
 
 PART_BYTES = 60 * 1024
@@ -102,6 +103,49 @@ class MessageProgress:
                     self.timing.record_step(int(key.split(':')[1]), provider_type or kind,
                                             label=part['toolName'], status=status)
 
+    def timeline_rows(self):
+        return [wire_row(part) for part in sorted(self.parts.values(), key=lambda part: part['sequence'])]
+
+    def publish(self, key, part):
+        kind = part['type']
+        status = part.get('status', 'completed')
+        provider = part.get('providerType', '')
+        if kind in ('tool', 'server_tool'):
+            bounded = bounded_part(sanitize(part, secrets=self.redactor.secrets), maximum=PART_BYTES - 1024)
+            details = bounded.get('output') if bounded.get('output') is not None else bounded.get('input')
+            self.put(key, 'tool_call', json.dumps(details, ensure_ascii=False)[:800] if details else '',
+                     status=status, tool_name=part['toolName'], call_id=part['toolCallId'], provider_type=provider,
+                     tool_kind='client' if kind == 'tool' else 'server', payload=bounded,
+                     truncated=bool(bounded.get('truncated')))
+        elif kind == 'reasoning':
+            self.put(key, 'reasoning_summary', part['reasoning'], status=status, provider_type=provider)
+        elif kind in ('image', 'document'):
+            self.put(key, kind, status=status, provider_type=provider, payload=part)
+        else:
+            self.put(key, 'text', part['text'], status=status, provider_type=provider)
+
+    def tool_step(self, key, name, call_id, provider, payload, *, group, status, client=False, result=False, match_name=False):
+        # Explicit call IDs take precedence. Some Gemini tools omit IDs, so
+        # pair their results with the oldest still-open call of this kind.
+        if not result:
+            previous = self.parts.get(key, {}).get('payload') or {}
+            self.publish(key, tool_part(name, call_id or key, provider,
+                                       status=previous.get('status', status) if previous.get('output') is not None else status,
+                                       input=payload, output=previous.get('output'), client=client))
+            return
+        for old_key, row in self.parts.items():
+            old = row.get('payload') or {}
+            if old.get('type') not in ('tool', 'server_tool') or old.get('input') is None:
+                continue
+            if old.get('providerType') != group or (old.get('type') == 'tool') != client:
+                continue
+            if match_name and not call_id and old.get('toolName') != name:
+                continue
+            if (call_id and call_id == old.get('toolCallId')) or (not call_id and old.get('output') is None):
+                self.publish(old_key, {**old, 'output': payload, 'status': status})
+                return
+        self.publish(key, tool_part(name, call_id or key, provider, status=status, output=payload, client=client))
+
     def snapshot(self, data):
         raw_usage = data.get('usage') or {}
         self.usage.update({dst: max(self.usage.get(dst, 0), raw_usage[src]) for src, dst in USAGE.items()
@@ -145,13 +189,13 @@ class MessageProgress:
                 if isinstance(p, dict):
                     for ann in p.get('annotations') or []:
                         if isinstance(ann, dict) and ann.get('url'):
-                            annotations.append({'title': ann.get('title', ''), 'url': ann.get('url', '')})
+                            annotations.append(ann)
                     if p.get('type') == 'image':
                         self.put(f'{key}:img', 'image', json.dumps({'mimeType': p.get('mime_type') or p.get('mimeType') or 'image/png',
                                                                     'uri': p.get('uri') or '', 'inline': bool(p.get('data'))}, ensure_ascii=False),
                                  status=status, provider_type='image')
             if annotations:
-                self.put(f'{key}:annotations', 'annotations', json.dumps(annotations, ensure_ascii=False),
+                self.put(f'{key}:annotations', 'annotations', json.dumps(citations(annotations), ensure_ascii=False),
                          status=status, provider_type='annotations')
         elif kind.endswith(('_call', '_result')):
             # Serialize only known tool fields; discard signatures and hidden provider state.
@@ -167,14 +211,12 @@ class MessageProgress:
                 if isinstance(value, str): return self.redactor.redact(value)
                 return value
             clean_payload = scrub(payload) if payload else None
-            text = json.dumps(clean_payload, ensure_ascii=False) if clean_payload else ''
-            is_err = bool(step.get('is_error')) or (isinstance(step.get('exit_code'), int) and step['exit_code'] != 0)
-            tool_kind = 'client' if kind in ('function_call', 'function_result') else 'server'
-            self.put(key, 'tool_call' if kind.endswith('_call') else 'tool_result', text,
-                     status='failed' if is_err else status,
-                     tool_name=str(step.get('server_name') or step.get('name') or step.get('tool_name') or kind),
-                     call_id=str(step.get('call_id') or step.get('id') or ''), provider_type=kind,
-                     payload=clean_payload, tool_kind=tool_kind)
+            is_err = bool(step.get('is_error')) or (type(step.get('exit_code')) is int and step['exit_code'] != 0)
+            result = kind.endswith('_result')
+            self.tool_step(key, str(step.get('name') or step.get('server_name') or step.get('tool_name') or kind),
+                           str(step.get('call_id') or step.get('id') or ''), kind, clean_payload or {},
+                           group=kind[:-7] + '_call' if result else kind,
+                           status='failed' if is_err else status, client=kind.startswith('function_'), result=result)
 
     def consume(self, data, sse_type='', event_id=None):
         if not isinstance(data, dict): return
@@ -226,7 +268,7 @@ class MessageProgress:
                 combined = (step.get('arguments') if isinstance(step.get('arguments'), str) else '') + delta.get('arguments', '')
                 step['arguments'] = combined.encode()[:PART_BYTES].decode('utf-8', errors='ignore')
             elif delta_type == 'text_annotation_delta' and isinstance(delta.get('annotations'), list):
-                anns = [{'title': a.get('title', ''), 'url': a.get('url', '')} for a in delta['annotations'] if isinstance(a, dict) and a.get('url')]
+                anns = citations(delta['annotations'])
                 if anns:
                     self.put(f'step:{index}:annotations', 'annotations', json.dumps(anns, ensure_ascii=False), status='running', provider_type='annotations')
             elif step.get('type', '').endswith(('_call', '_result')):
@@ -288,9 +330,9 @@ class MessageProgress:
                 keys = sorted(self.dirty, key=lambda key: self.parts[key]['sequence'])
                 if not keys: break
 
-    async def pump(self):
+    async def pump(self, *, interval=5):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(interval)
             try:
                 # A quiet agent still needs a real executor heartbeat. Scheduler
                 # reconciliation updates the job timestamp without runner contact.

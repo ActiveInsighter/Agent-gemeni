@@ -47,9 +47,10 @@ for raw in sys.stdin:
         approval_raw = sys.stdin.readline()
         approval = json.loads(approval_raw)
         if approval.get("result", {}).get("decision") == "accept":
-            sys.stdout.write(json.dumps({"method": "item/reasoning/summaryTextDelta", "params": {"delta": "Thinking..."}}) + "\n")
-            sys.stdout.write(json.dumps({"method": "item/started", "params": {"item": {"id": "cmd_1", "type": "commandExecution", "command": "ls"}}}) + "\n")
-            sys.stdout.write(json.dumps({"method": "item/completed", "params": {"item": {"id": "cmd_1", "type": "commandExecution", "status": "completed", "output": "ok"}}}) + "\n")
+            sys.stdout.write(json.dumps({"method": "item/reasoning/summaryTextDelta", "params": {"itemId": "reason_1", "summaryIndex": 0, "delta": "Thinking..."}}) + "\n")
+            sys.stdout.write(json.dumps({"method": "item/started", "params": {"item": {"id": "cmd_1", "type": "commandExecution", "command": "ls", "cwd": "/workspace"}}}) + "\n")
+            sys.stdout.write(json.dumps({"method": "item/commandExecution/outputDelta", "params": {"itemId": "cmd_1", "delta": "ok"}}) + "\n")
+            sys.stdout.write(json.dumps({"method": "item/completed", "params": {"item": {"id": "cmd_1", "type": "commandExecution", "status": "completed", "exitCode": 0}}}) + "\n")
             sys.stdout.write(json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "Hello "}}) + "\n")
             sys.stdout.write(json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "from Codex"}}) + "\n")
             sys.stdout.write(json.dumps({
@@ -169,7 +170,9 @@ class CodexAndServerTests(unittest.TestCase):
                 self.assertEqual(result["thinkingSummary"], "Thinking...")
                 self.assertEqual(result["usage"]["totalTokenCount"], 15)
                 self.assertEqual(result["usage"]["agentStepCount"], 1)
-                self.assertEqual(result["response"]["version"], 1)
+                tool = result["parts"][1]
+                self.assertEqual(tool["input"], {"command": "ls", "cwd": "/workspace"})
+                self.assertEqual(tool["output"], {"aggregatedOutput": "ok", "exitCode": 0})
                 self.assertTrue(any(isinstance(c, dict) and c.get("threadId") == "thr_test_1" for c in checkpoints))
 
         asyncio.run(scenario())

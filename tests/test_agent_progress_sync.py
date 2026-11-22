@@ -5,6 +5,7 @@ import httpx
 
 from agent_progress_sync import VerifiedProgressWriter
 from gemini_text import PocketBase
+from agent_timeline import wire_row
 
 
 class SyncTests(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +36,7 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             ack = await writer({'executionId': '123:1', 'sequence': 1, 'parts': [part], 'usage': {'agentStepCount': 8}})
         self.assertTrue(ack['accepted'])
         self.assertEqual([body['sequence'] for body in writes], [1, 2])
-        self.assertEqual(saved, [part])
+        self.assertEqual(saved, [wire_row(part)])
 
     async def test_identity_change_stops_without_any_write(self):
         methods = []
@@ -67,4 +68,4 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             writer = VerifiedProgressWriter(client, PocketBase(client, 'https://pb.fixture'), 'a' * 15, 'b' * 15, '123:1')
             await writer({'executionId': '123:1', 'sequence': 1, 'parts': [part], 'usage': {}})
         self.assertEqual(writes[0], writes[1], 'lost ACK retries must use the exact batch')
-        self.assertEqual(saved, [part])
+        self.assertEqual(saved, [wire_row(part)])

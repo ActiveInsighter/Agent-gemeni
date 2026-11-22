@@ -16,6 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from agent_progress import MessageProgress, observe_progress
+from agent_timeline import wire_row
 
 ACTIVE = {'dispatching', 'pending', 'running'}
 
@@ -49,7 +50,7 @@ class VerifiedProgressWriter:
             body['sequence'] = message.get('uploadSequence', 0) + 1
             # The original runner owns usage/final result. Repair only public
             # parts, without overwriting its cumulative provider counters.
-            wire = {**body, 'usage': {}}
+            wire = {**body, 'usage': {}, 'parts': [wire_row(row) for row in body['parts']]}
             if self.progress:
                 self.progress.save_spool()
             try:
@@ -67,7 +68,7 @@ class VerifiedProgressWriter:
                     filter=f'message="{self.message_id}" && ({keys})', perPage=32)
                 saved = {part['key']: part for part in rows.get('items', [])}
                 if not all(part['key'] in saved and all(saved[part['key']].get(key) == value
-                    for key, value in part.items()) for part in body['parts']):
+                    for key, value in part.items()) for part in wire['parts']):
                     # A concurrent old heartbeat may have won this sequence.
                     # Never treat its duplicate-sequence ACK as our data saved.
                     await self.sleep(min(2 ** attempt, 16))

@@ -16,7 +16,7 @@ MAX_VALUE_CHARS = 64000
 SENSITIVE = re.compile(r'(?i)signature|authorization|password|secret|api[_-]?key|access[_-]?token|credential|^token$|^headers$|^environment$')
 
 
-def sanitize(value, *, secrets=(), depth=0):
+def sanitize(value, *, secrets=(), depth=0, text_limit=MAX_VALUE_CHARS, parse_strings=True):
     if depth > 12:
         return '[nested value omitted]'
     if isinstance(value, dict):
@@ -37,12 +37,12 @@ def sanitize(value, *, secrets=(), depth=0):
     value = re.sub(r'(?i)(\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]+', r'\1[REDACTED]', value)
     value = re.sub(r'(?i)((?:password|authorization|api[_-]?key|access[_-]?token|token|secret)["\x27]?\s*[:=]\s*["\x27]?)[^\s,"\x27;&}]+', r'\1[REDACTED]', value)
     value = re.sub(r'(https?://)[^/@\s]+:[^/@\s]+@', r'\1[REDACTED]@', value)
-    if value.lstrip().startswith(('{', '[')):
+    if parse_strings and value.lstrip().startswith(('{', '[')):
         try:
             return json.dumps(sanitize(json.loads(value), secrets=secrets, depth=depth + 1), ensure_ascii=False)
         except ValueError:
             pass
-    return value[:MAX_VALUE_CHARS] + ('\n[truncated]' if len(value) > MAX_VALUE_CHARS else '')
+    return value[:text_limit] + ('\n[truncated]' if len(value) > text_limit else '')
 
 
 def snapshot(protocol, parts, metadata, *, secrets=()):
@@ -165,11 +165,15 @@ def _dedupe_annotations(items):
         title = str(item.get('title') or '').strip()
         if not url:
             continue
-        key = (title, url)
+        start, end = item.get('start_index'), item.get('end_index')
+        key = (title, url, start, end) if type(start) is int and type(end) is int else (title, url)
         if key in seen:
             continue
         seen.add(key)
-        result.append({'type': 'url_citation', 'title': title or url, 'url': url})
+        row = {'type': 'url_citation', 'title': title or url, 'url': url}
+        if len(key) == 4:
+            row.update(start_index=start, end_index=end)
+        result.append(row)
     return result
 
 
@@ -232,7 +236,7 @@ def extract_structured_payload(protocol, data, *, secrets=(), reply_text=''):
         open_client_tools = {}
         text_chunks = []
 
-        for ci, candidate in enumerate(candidates):
+        for ci, candidate in enumerate(candidates[:1]):
             if not isinstance(candidate, dict):
                 continue
             gm = candidate.get('groundingMetadata')
@@ -273,8 +277,9 @@ def extract_structured_payload(protocol, data, *, secrets=(), reply_text=''):
                         ui_parts.append(sanitize({
                             'sequence': next_seq(),
                             'type': 'text',
-                            'text': part['text'],
+                            'text': '',
                         }, secrets=secret_list))
+                        ui_parts[-1]['text'] = sanitize(part['text'], secrets=secret_list, text_limit=2 * 1024 * 1024, parse_strings=False)
                 elif isinstance(part.get('executableCode'), dict):
                     ec = part['executableCode']
                     cid = str(ec.get('id') or f'c{ci}p{pi}:code_execution')[:256]
@@ -438,14 +443,16 @@ def extract_structured_payload(protocol, data, *, secrets=(), reply_text=''):
                         continue
                     for ann in block.get('annotations') or []:
                         if isinstance(ann, dict) and ann.get('url'):
-                            annotations.append({'title': ann.get('title', ''), 'url': ann.get('url', '')})
+                            annotations.append(ann)
                     if block.get('type') == 'text' and isinstance(block.get('text'), str):
                         text_chunks.append(block['text'])
                         ui_parts.append(sanitize({
                             'sequence': next_seq(),
                             'type': 'text',
-                            'text': block['text'],
+                            'text': '',
+                            'annotations': _dedupe_annotations(block.get('annotations') or []),
                         }, secrets=secret_list))
+                        ui_parts[-1]['text'] = sanitize(block['text'], secrets=secret_list, text_limit=2 * 1024 * 1024, parse_strings=False)
                     elif block.get('type') == 'image':
                         ui_parts.append(sanitize({
                             'sequence': next_seq(),
@@ -510,7 +517,7 @@ def extract_structured_payload(protocol, data, *, secrets=(), reply_text=''):
                 status = 'failed' if is_err else 'completed'
                 out_payload = {k: v for k, v in step.items() if k not in ('type', 'id', 'call_id', 'signature')}
                 idx = open_server_tools.pop((base_kind, cid), None)
-                if idx is None:
+                if idx is None and not cid:
                     for k in list(open_server_tools):
                         if k[0] == base_kind:
                             idx = open_server_tools.pop(k)

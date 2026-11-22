@@ -185,10 +185,10 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('检查现有实现', output)
         for private in ('hidden', 'fixture-api-key', 'signature', 'authorization', 'private'):
             self.assertNotIn(private, output)
-        self.assertEqual(len(progress.parts), 5)
+        self.assertEqual(len(progress.parts), 4)
         self.assertEqual(progress.usage['totalTokenCount'], 150)
         self.assertEqual(progress.usage['cachedContentTokenCount'], 80)
-        self.assertEqual(progress.parts['step:1']['callId'], progress.parts['step:2']['callId'])
+        self.assertEqual(progress.parts['step:1']['payload']['output'], {'result': {'stdout': 'ok'}})
 
     def test_duplicate_sse_deltas_are_not_appended_twice(self):
         p = MessageProgress()
@@ -275,7 +275,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         class Stream(httpx.AsyncByteStream):
             async def __aiter__(self):
                 yield b'data: {"candidates":[{"content":{"parts":[{"text":"hello "}]}}]}\n\n'
-                self_outer.assertEqual(p.parts['answer']['content'], 'hello ')
+                self_outer.assertEqual(p.parts['step:0']['content'], 'hello ')
                 yield b'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"world"}]}}],"usageMetadata":{"totalTokenCount":10}}\n\n'
         self_outer = self
         async def outbound(request):
@@ -287,5 +287,5 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['reply'], 'hello world')
         self.assertEqual(result['response']['parts'][0]['text'], 'hello world')
         self.assertEqual(result['response']['metadata']['usageMetadata']['totalTokenCount'], 10)
-        self.assertEqual(p.parts['answer']['status'], 'completed')
+        self.assertEqual(p.parts['step:0']['status'], 'completed')
         self.assertEqual(p.usage['totalTokenCount'], 10)
