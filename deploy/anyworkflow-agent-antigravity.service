@@ -1,0 +1,36 @@
+[Unit]
+Description=AnyWorkflow Antigravity CLI Agent executor
+Wants=network-online.target pocketbase.service
+After=network-online.target pocketbase.service
+
+[Service]
+Type=simple
+User=aw-antigravity-agent
+Group=aw-antigravity-agent
+StateDirectory=anyworkflow-agent-antigravity
+StateDirectoryMode=0700
+EnvironmentFile=/etc/anyworkflow/agent-antigravity.env
+Environment=HOME=/var/lib/anyworkflow-agent-antigravity
+Environment=PB_EXECUTOR_QUEUE=agy
+Environment=AGY_CWD=/var/lib/anyworkflow-agent-antigravity/workspaces
+Environment=RECOVERY_DIR=/var/lib/anyworkflow-agent-antigravity/recovery
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+# Bind the deployed application checkout to the following path in a drop-in.
+WorkingDirectory=/run/anyworkflow-antigravity-app
+ExecStart=/usr/bin/env /run/anyworkflow-antigravity-app/.venv/bin/python -m uvicorn app.server:get_app --factory --host 127.0.0.1 --port 18094 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=4s
+TimeoutStopSec=35s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=tmpfs
+ProtectSystem=strict
+ProtectProc=invisible
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

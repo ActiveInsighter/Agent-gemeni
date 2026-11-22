@@ -84,10 +84,13 @@ class ServerSettings:
         if reviewer not in {"auto_review", "guardian_subagent", "user"}:
             reviewer = "user"
         queue = os.environ.get("PB_EXECUTOR_QUEUE", "codex").strip()
-        if queue not in {"codex", "gemini"}:
-            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex or gemini")
+        if queue not in {"codex", "gemini", "agy"}:
+            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini or agy")
         if queue == "gemini" and not keys:
             raise RuntimeError("GEMINI_API_KEYS is required for the Gemini queue")
+        agy_api_key = os.environ.get("AGY_GEMINI_API_KEY", "").strip()
+        if queue == "agy" and not (agy_api_key or keys):
+            raise RuntimeError("AGY_GEMINI_API_KEY or GEMINI_API_KEYS is required for the Antigravity CLI queue")
         return cls(
             pb_url=pb_url,
             pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),
@@ -109,7 +112,7 @@ class ServerSettings:
             agy_bin=os.environ.get("AGY_BIN", "").strip() or "agy",
             agy_cwd=os.environ.get("AGY_CWD", "").strip() or "work/antigravity-cli/workspaces",
             agy_default_model=os.environ.get("AGY_DEFAULT_MODEL", "").strip(),
-            agy_api_key=os.environ.get("AGY_GEMINI_API_KEY", "").strip(),
+            agy_api_key=agy_api_key,
             agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
         )
