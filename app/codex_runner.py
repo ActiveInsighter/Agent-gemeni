@@ -13,6 +13,7 @@ from app.codex_app_server import (
     resolve_codex_model,
 )
 from app.config import ServerSettings
+from app.codex_timeline import CodexTimeline
 from gemini_agent import AgentCanceled, MAX_REPLY_BYTES, strip_image_markers
 from response_capture import snapshot
 
@@ -88,22 +89,6 @@ def _extract_usage(turn: dict[str, Any], params: dict[str, Any]) -> dict[str, in
     if "totalTokenCount" not in usage and ("promptTokenCount" in usage or "candidatesTokenCount" in usage):
         usage["totalTokenCount"] = usage.get("promptTokenCount", 0) + usage.get("candidatesTokenCount", 0)
     return usage
-
-
-def _extract_item_text(item: dict[str, Any]) -> str:
-    if isinstance(item.get("text"), str):
-        return item["text"]
-    content = item.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            c.get("text", "")
-            for c in content
-            if isinstance(c, dict) and isinstance(c.get("text"), str)
-        ]
-        return "".join(parts)
-    return ""
 
 
 async def generate_codex(
@@ -188,12 +173,8 @@ async def generate_codex(
                 await codex.turn_interrupt(thread_id, turn_id)
                 raise AgentCanceled("Codex turn canceled")
 
-        answer_chunks: dict[str, str] = {}
+        timeline = CodexTimeline(progress, MAX_REPLY_BYTES)
         usage: dict[str, int] = {}
-        reasoning_chunks: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        step_seq = 0
-        item_to_step: dict[str, int] = {}
         final_turn: dict[str, Any] = {}
         final_params: dict[str, Any] = {}
         turn_error = ""
@@ -219,94 +200,18 @@ async def generate_codex(
             except asyncio.TimeoutError:
                 continue
 
-            if method == "item/agentMessage/delta":
-                delta = str(params.get("delta") or "")
-                if delta:
-                    item_id = str(params.get("itemId") or "answer")
-                    answer_chunks[item_id] = answer_chunks.get(item_id, "") + delta
-                    current_answer = answer_chunks[item_id]
-                    if len(current_answer.encode("utf-8")) > MAX_REPLY_BYTES:
-                        await codex.turn_interrupt(thread_id, turn_id)
-                        raise RuntimeError("Codex reply exceeds 2 MiB")
-                    if progress is not None:
-                        progress.put("answer", "text", current_answer, status="running")
-
-            elif method == "thread/tokenUsage/updated":
-                usage = _extract_usage({}, {"usage": (params.get("tokenUsage") or {}).get("last")})
+            turn = params.get("turn") or {}
+            if params.get("threadId") not in (None, thread_id) or (params.get("turnId") or turn.get("id")) not in (None, turn_id):
+                continue
+            if method == "thread/tokenUsage/updated":
+                usage.update(_extract_usage({}, {"usage": (params.get("tokenUsage") or {}).get("last")}))
                 if progress is not None:
                     progress.usage.update(usage)
-
-            elif method == "item/reasoning/summaryTextDelta":
-                delta = str(params.get("delta") or "")
-                if delta:
-                    reasoning_chunks.append(delta)
-                    if progress is not None:
-                        progress.put("reasoning", "reasoning_summary", "".join(reasoning_chunks), status="running")
-
-            elif method == "item/started":
-                item = params.get("item") if isinstance(params.get("item"), dict) else {}
-                item_type = str(item.get("type") or "")
-                item_id = str(item.get("id") or "")
-                if item_type in {"commandExecution", "fileChange", "mcpToolCall", "webSearch", "toolCall"}:
-                    seq = step_seq
-                    step_seq += 1
-                    if item_id:
-                        item_to_step[item_id] = seq
-                    tool_name = str(item.get("tool") or item.get("name") or item_type)
-                    tool_calls.append({
-                        "toolName": tool_name,
-                        "kind": item_type,
-                        "status": "running",
-                        "callId": item_id,
-                    })
-                    if progress is not None:
-                        progress.put(
-                            f"step:{seq}",
-                            "tool_call",
-                            "",
-                            status="running",
-                            tool_name=tool_name,
-                            call_id=item_id,
-                            provider_type=item_type,
-                            tool_kind="server",
-                        )
-
-            elif method == "item/completed":
-                item = params.get("item") if isinstance(params.get("item"), dict) else {}
-                item_type = str(item.get("type") or "")
-                item_id = str(item.get("id") or "")
-                if item_type == "agentMessage":
-                    item_text = _extract_item_text(item)
-                    if item_text:
-                        if item_id not in answer_chunks and len(answer_chunks) == 1 and "answer" in answer_chunks:
-                            answer_chunks.clear()
-                        answer_chunks[item_id] = item_text
-                elif item_type in {"commandExecution", "fileChange", "mcpToolCall", "webSearch", "toolCall"}:
-                    seq = item_to_step.get(item_id)
-                    if seq is None:
-                        seq = step_seq
-                        step_seq += 1
-                    status = str(item.get("status") or "completed")
-                    is_failed = status.lower() in {"failed", "error", "declined"}
-                    tool_name = str(item.get("tool") or item.get("name") or item_type)
-                    for tc in tool_calls:
-                        if tc.get("callId") == item_id:
-                            tc["status"] = "failed" if is_failed else "completed"
-                    if progress is not None:
-                        progress.put(
-                            f"step:{seq}",
-                            "tool_call",
-                            "",
-                            status="failed" if is_failed else "completed",
-                            tool_name=tool_name,
-                            call_id=item_id,
-                            provider_type=item_type,
-                            tool_kind="server",
-                        )
-
             elif method == "turn/completed":
-                final_params = params
-                final_turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                final_params, final_turn = params, turn
+                for item in turn.get("items") or []:
+                    if isinstance(item, dict):
+                        timeline.update(item, completed=True)
                 status = str(final_turn.get("status") or "completed").lower()
                 if status == "interrupted":
                     raise AgentCanceled("Codex turn interrupted")
@@ -319,38 +224,33 @@ async def generate_codex(
                     finish_reason = status.upper()
                 break
 
-        reply = next(reversed(answer_chunks.values()), "")
+            else:
+                try:
+                    timeline.consume(method, params)
+                except ValueError:
+                    await codex.turn_interrupt(thread_id, turn_id)
+                    raise
+
+        reply = timeline.answer()
         if not reply and isinstance(final_turn.get("finalResponse"), str):
             reply = final_turn["finalResponse"]
         if not reply and not turn_error:
             turn_error = "Codex 返回空回复"
         if len(reply.encode("utf-8")) > MAX_REPLY_BYTES:
             raise RuntimeError("Codex reply exceeds 2 MiB")
-        reasoning = "".join(reasoning_chunks).encode("utf-8")[:MAX_REPLY_BYTES].decode("utf-8", errors="ignore")
+        parts = timeline.parts()
+        if reply and not timeline.answer():
+            parts.append({"type": "text", "text": reply})
         usage.update(_extract_usage(final_turn, final_params))
-        if step_seq:
-            usage["agentStepCount"] = step_seq
-
+        steps = sum(part["type"] in ("tool", "server_tool") for part in parts)
+        if steps:
+            usage["agentStepCount"] = steps
         if progress is not None:
-            if reply:
-                progress.put("answer", "text", reply, status="completed")
-            if reasoning:
-                progress.put("reasoning", "reasoning_summary", reasoning, status="completed")
             progress.usage.update(usage)
-
-        response_parts = [
-            {"id": key, "type": kind, "text": text}
-            for key, kind, text in (("answer", "text", reply), ("reasoning", "reasoning", reasoning))
-            if text
-        ]
-
+        reasoning = "\n\n".join(part["reasoning"] for part in parts if part["type"] == "reasoning")
         return {
-            "reply": reply,
-            "error": turn_error,
-            "finishReason": finish_reason,
-            "protocol": "codex-app-server",
+            "reply": reply, "error": turn_error, "finishReason": finish_reason,
+            "protocol": "codex-app-server", "usage": usage, "parts": parts,
             "thinkingSummary": reasoning,
-            "usage": usage,
-            "toolCalls": tool_calls,
-            "response": snapshot("codex-app-server", response_parts, {"model": model}),
+            "response": snapshot("codex-app-server", [], {"model": model}),
         }

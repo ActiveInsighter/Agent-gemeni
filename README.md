@@ -382,8 +382,7 @@ Remote 以此显示执行器在线状态，以最后一个非状态分段的时�
 checkpoint 使用同一 executionId 和 interaction 身份重试短暂的 PB 5xx/连接故障，
 指数退避最多 16 秒、最多重试 12 次，为短暂发布提供比原先 7 秒更长的恢复窗口。
 权限等明确 4xx 错误仍立即报告，不重发模型创建请求。
-先发布 AnyWorkflow-workers 的 `1794870000_agent_message_parts.js` 迁移及 hooks，再更新执行器和 Remote。
-完整接口及发布设计见后端 `docs/agent-message-stream.md`。
+当前 Agent 时间线涉及 PocketBase 结构变更、执行器适配与 RikkaHub 读取。参见 [消息时间线与部署](docs/pocketbase-schema-migration.md)。
 
 对仍在执行、过程同步已停止的单段任务，可显式运行 `sync-<原任务ID>`。
 它只 GET 原 interaction 并写进度，不领取任务、不创建模型请求、不完成或取消原执行。

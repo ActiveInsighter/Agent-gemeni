@@ -1,90 +1,31 @@
-# PocketBase 数据库字段迁移与 RikkaHub 前端对接指南
+# Agent 消息时间线
 
-本文件记录了 `file-converter-ai` 重构后向 PocketBase 上传的所有结构化字段（覆盖普通 Gemini `generateContent` / `streamGenerateContent` 与 Antigravity `v1beta/interactions` API），供你在 PocketBase 服务端手动修改表结构与 `pb_hooks`，并方便后续在 `rikkahub-antigravity` 前端直接读取展示。
+Codex、Antigravity 和普通 Gemini 通过 `agent_timeline.py` 写入同一种有序内容块。新增提供商只需将其输出转成这些内容块，并提供对应的用量、正文和结束原因。PocketBase 根据来源协议记录 `protocol`，RikkaHub 按内容块类型渲染。
 
-> 自动化脚本已同步提供在 [`migrations/pb_migrations_gemini_structured_parts.js`](../migrations/pb_migrations_gemini_structured_parts.js)，部署时使用后端仓库 `pocketbase/pb_migrations/1794906000_gemini_structured_parts.js` 的有序文件名；此处保留相同副本。必须同时部署后端 `gemini_execution.js`、`gemini_structured.js`、`gemini_response.js`、`agent_parts.js`，以放行、校验并持久化新字段。
+## 存储与接口
 
----
+| 位置 | 内容 |
+| --- | --- |
+| `aw_gemini_jobs` | 提交参数、所有者、执行身份、调度状态、会话关联 |
+| `aw_gemini_messages` | 每个分段的正文 `reply`、状态、时间、用量、`structuredOutput` 和终态 `timeline` |
+| `aw_agent_parts` | 流式内容块。按 `message + key` 更新，按 `sequence` 排序，按 `revision` 增量读取 |
 
-## 一、`aw_gemini_messages` 新增 / 确认字段
+执行器通过 `POST …/progress` 发送带 `executionId` 和递增批次号的 `{key, sequence, part}`。客户端用 `GET …/parts?after=N` 读取更新。消息完成时，`POST …/complete` 在一个事务中保存终态时间线和正文，并清理流式记录。取消或无终态上报的中断保留已收到的流式分片。
 
-| 字段名 | PocketBase 类型 | 建议大小 / 选项 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `protocol` | `text` | max: `64` | 协议标识：`"generateContent"` 或 `"interactions"` |
-| `parts` | `json` | maxSize: `2097152` (2 MiB) | **核心有序展示数组**，与 RikkaHub `UIMessagePart` 一一对应（`reasoning` / `server_tool` / `tool` / `text` / `image` / `document`） |
-| `thinkingSummary` | `text` | max: `2097152` | 公开思考摘要纯文本拼接（已过滤加密 `thoughtSignature` 与原始私有思考正文） |
-| `toolCalls` | `json` | maxSize: `1048576` (1 MiB) | 所有工具调用汇总（含服务端工具与客户端函数调用，已按 `callId` 配对输入输出） |
-| `codeExecutions` | `json` | maxSize: `1048576` (1 MiB) | 代码执行专项汇总（`callId`, `language`, `code`, `outcome`, `output`, `stdout`, `stderr`, `exitCode`, `status`） |
-| `annotations` | `json` | maxSize: `524288` (512 KiB) | 网页引用/标注列表 `[{"type":"url_citation","title":"...","url":"..."}]`（来自 `groundingMetadata`、`urlContextMetadata`、`citationMetadata`、Interactions `annotations`） |
-| `grounding` | `json` | maxSize: `524288` (512 KiB) | 原始脱敏后的 `groundingMetadata`、`urlContextMetadata`、`citationMetadata` |
-| `structuredOutput` | `json` | maxSize: `524288` (512 KiB) | 当模型返回合法 JSON（如启用 `responseMimeType: "application/json"` / `responseSchema`）时自动解析的 JSON 对象/数组，否则为 `null` |
-| `execution` | `json` | maxSize: `65536` | 运行耗时元数据：`{"startedAt","finishedAt","durationSeconds","timingBasis"}` |
-| `usage` | `json` | maxSize: `65536` | 标准化 Token 用量：`promptTokenCount`, `candidatesTokenCount`, `thoughtsTokenCount`, `cachedContentTokenCount`, `toolUseTokenCount`, `totalTokenCount`, `agentStepCount`, `agentToolCalls` |
-| `finishReason` | `text` | max: `64` | 结束原因（如 `STOP`, `MAX_TOKENS`, `COMPLETED`, `FAILED`） |
-| `response` | `json` | maxSize: `2097152` (2 MiB) | 完整脱敏版 v1 快照（向后兼容保留） |
-| `uploadSequence` | `number` | - | 流式增量上传序号（用于幂等去重） |
+终态 `timeline` 由 `version: 1`、`parts`、`annotations`、`omittedParts` 组成。终态内容块额外带有 `sequence`，用量、执行身份与状态仍由消息和任务分别管理。
 
----
+| 内容块 | 字段 |
+| --- | --- |
+| `text` | `text`，可带正文局部引用 `annotations` |
+| `reasoning` | 提供商公开的 `reasoning` 和 `reasoningType: "summary_text"` |
+| `server_tool` / `tool` | `toolCallId`、`toolName`、`input`、`output`，后两者是 JSON |
+| `image` / `document` | `url`、`mimeType`，可带 `fileName` |
+| `annotations` / `status` | 流式引用和执行状态 |
 
-## 二、`aw_agent_parts` 流式分片表字段（`/progress` 实时上传）
+内容块带 `status`，可选 `providerType` 和 `truncated`。工具结果更新原调用卡片的位置。引用使用 `title` 和 `url`，上游给出区间时保留块内 `startIndex` 和 `endIndex`。RikkaHub 复用原有的来源列表。时间线最大 5 MiB，流式内容块约 60 KiB。超限信息通过 `truncated` 和 `omittedParts` 传递。
 
-流式运行期间，`MessageProgress` 会将增量分片发送到 `POST /api/anyworkflow/gemini/jobs/{jobId}/messages/{messageId}/progress`，每个 `part` 包含以下字段：
+Codex 的终端、文件修改、搜索、MCP 和计划在适配层采集。终端日志支持流式更新，文件 diff 读取 App Server 的文件修改项。Gemini 和 Antigravity 的工具、公开摘要和正文按上游顺序转换。签名、私有推理和凭据字段不进入展示数据。格式参考 [Codex App Server](https://learn.chatgpt.com/docs/app-server)、[Gemini generateContent](https://ai.google.dev/api/generate-content) 和 [Interactions steps](https://aistudio.google.com/docs/interactions-breaking-changes-may-2026)。
 
-| 字段名 | PocketBase 类型 | 说明 |
-| :--- | :--- | :--- |
-| `owner` | `relation` (`aw_clients`) | 所属用户（沿用已有访问规则） |
-| `message` | `relation` (`aw_gemini_messages`) | 所属消息 |
-| `key` | `text` (120) | 稳定幂等键，如 `step:0`, `reasoning`, `answer`, `annotations`, `agent-status` |
-| `sequence` | `number` | 排序序号（`1..9998` 为步骤，`9999` 为 `answer`，`10000` 为 `agent-status`） |
-| `type` | `text` (64) | `reasoning_summary` / `tool_call` / `tool_result` / `text` / `image` / `annotations` / `status` |
-| `status` | `text` (32) | `running` / `completed` / `failed` |
-| `toolName` | `text` (120) | 工具名，如 `code_execution`, `google_search`, `url_context`, `mcp_server`, 函数名 |
-| `toolKind` | `text` (32) | `"server"`（服务端工具）或 `"client"`（客户端函数） |
-| `callId` | `text` (256) | 工具调用关联 ID |
-| `providerType` | `text` (120) | 官方原始类型，如 `executableCode`, `codeExecutionResult`, `code_execution_call`, `google_search_call` |
-| `content` | `text` (131072) | 文本或序列化 JSON 内容（已脱敏、截断保护） |
-| `payload` | `json` (131072) | 结构化工具参数/结果对象（`language`, `code`, `outcome`, `stdout`, `stderr`, `arguments`, `response` 等） |
-| `truncated` | `bool` | 是否超过单分片 60 KiB 上限 |
+## 部署
 
----
-
-## 三、`pb_hooks` 持久化参考（`/complete` 与 `/progress`）
-
-在 PocketBase 的 `pb_hooks` 中，`/api/anyworkflow/gemini/jobs/:jobId/messages/:messageId/complete` 接收到请求体 `body` 后，将以下字段写入 `aw_gemini_messages` 记录：
-
-```js
-// complete hook 示例片段
-message.set("reply", body.reply || "");
-message.set("error", body.error || "");
-message.set("finishReason", body.finishReason || "");
-message.set("usage", body.usage || {});
-message.set("response", body.response || null);
-
-// 新增结构化字段
-message.set("protocol", body.protocol || "");
-message.set("parts", body.parts || []);
-message.set("thinkingSummary", body.thinkingSummary || "");
-message.set("toolCalls", body.toolCalls || []);
-message.set("codeExecutions", body.codeExecutions || []);
-message.set("annotations", body.annotations || []);
-message.set("grounding", body.grounding || null);
-message.set("structuredOutput", body.structuredOutput ?? null);
-message.set("execution", body.execution || null);
-```
-
----
-
-## 四、RikkaHub 前端 (`UIMessagePart`) 1:1 映射说明
-
-后续修改 `rikkahub-antigravity` 时，直接读取 `aw_gemini_messages.parts`（以及 `annotations`、`usage`），即可直接构造 `UIMessage` 并交由现有 `ChatMessage` / `ChatMessageCot`（`ChainOfThought`）渲染：
-
-| `parts[i].type` | 对应 RikkaHub `UIMessagePart` | 字段映射 |
-| :--- | :--- | :--- |
-| `"reasoning"` | `UIMessagePart.Reasoning` | `reasoning = part.reasoning`, `reasoningType = ReasoningType.SUMMARY_TEXT` |
-| `"server_tool"` | `UIMessagePart.ServerTool` | `toolCallId = part.toolCallId`, `toolName = part.toolName`, `input = part.input`, `output = part.output`, `status = ServerToolStatus` (`in_progress` / `completed` / `failed`) |
-| `"tool"` | `UIMessagePart.Tool` | `toolCallId = part.toolCallId`, `toolName = part.toolName`, `input = part.input`, `output = [UIMessagePart.Text(...)]` |
-| `"text"` | `UIMessagePart.Text` | `text = part.text` |
-| `"image"` | `UIMessagePart.Image` / 附件 | `mimeType = part.mimeType`, `url = part.uri` |
-| `"document"` | `UIMessagePart.Document` | `mime = part.mimeType`, `url = part.uri` |
-| `annotations[]` | `UIMessageAnnotation.UrlCitation` | `title = item.title`, `url = item.url` |
-| `usage` | `TokenUsage` | `promptTokens = promptTokenCount`, `completionTokens = candidatesTokenCount + thoughtsTokenCount`, `cachedTokens = cachedContentTokenCount`, `totalTokens = totalTokenCount` |
+先等待已有任务结束，再暂停 Codex 和 Gemini 执行器，应用 AnyWorkflow-workers 的 `1795350000_agent_timeline.js` 和对应 hooks，再启动新版执行器并发布 RikkaHub。迁移会删掉旧结构化输出和流式记录，保留任务、会话正文、用量与各自的所有者。部署检查包括两个队列的健康状态、同一工具块的实时更新、完成后重新读取时间线和 Android 构建。

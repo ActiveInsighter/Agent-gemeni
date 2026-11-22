@@ -162,9 +162,9 @@ class StreamingAndProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p['type'] for p in result['parts']], ['reasoning', 'server_tool', 'text'])
         self.assertEqual(len(result['codeExecutions']), 1)
         self.assertEqual(result['annotations'][0]['url'], 'https://docs.python.org')
-        self.assertEqual(progress.parts['answer']['content'], 'Result is 2')
-        self.assertEqual(progress.parts['reasoning']['content'], 'Thinking...')
-        self.assertEqual(progress.parts['step:0']['toolKind'], 'server')
+        self.assertEqual(progress.parts['step:3']['content'], 'Result is 2')
+        self.assertEqual(progress.parts['step:0']['content'], 'Thinking...')
+        self.assertEqual(progress.parts['step:1']['toolKind'], 'server')
         self.assertEqual(progress.usage['thoughtsTokenCount'], 3)
 
     async def test_progress_keys_have_unique_stable_sequences_and_bound_payloads(self):
