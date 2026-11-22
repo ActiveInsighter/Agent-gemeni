@@ -1,0 +1,19 @@
+services:
+  agent-server:
+    build: .
+    container_name: anyworkflow-agent-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Mount host Codex CLI login (~/.codex/auth.json) and session rollouts
+      - ${HOME}/.codex:/root/.codex
+      # Persist recovery files across restarts
+      - ./data/recovery:/data/recovery
+      # Optional workspace directory for Codex file/command execution
+      - ./workspace:/workspace
+    environment:
+      RECOVERY_DIR: /data/recovery
+      CODEX_CWD: /workspace

@@ -1,0 +1,98 @@
+"""Server configuration loaded from environment variables."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import re
+
+
+def _parse_bool(raw: str | None, default: bool = False) -> bool:
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_int(raw: str | None, default: int, *, minimum: int = 0) -> int:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(minimum, int(raw.strip()))
+    except ValueError:
+        return default
+
+
+def _parse_float(raw: str | None, default: float, *, minimum: float = 0.0) -> float:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(minimum, float(raw.strip()))
+    except ValueError:
+        return default
+
+
+def validate_pb_url(raw: str, *, allow_http: bool = True) -> str:
+    root = (raw or "").strip().rstrip("/")
+    pattern = r"https?://[^/?#@]+" if allow_http else r"https://[^/?#@]+"
+    if not re.fullmatch(pattern, root):
+        scheme = "HTTP(S)" if allow_http else "HTTPS"
+        raise RuntimeError(f"GEMINI_PB_URL must be a valid {scheme} origin")
+    return root
+
+
+@dataclass(frozen=True)
+class ServerSettings:
+    pb_url: str
+    pb_token: str = ""
+    pb_email: str = ""
+    pb_password: str = ""
+    gemini_api_keys: tuple[str, ...] = ()
+    gemini_key_groups: str = ""
+    server_auth_token: str = ""
+    max_concurrent_jobs: int = 8
+    recovery_dir: Path = Path("work/gemini/recovery")
+    pb_poll_interval_seconds: float = 0.0
+    codex_bin: str = "codex"
+    codex_cwd: str = "."
+    codex_sandbox: str = "workspace-write"
+    codex_approvals_reviewer: str = "auto_review"
+    codex_default_model: str = ""
+    codex_turn_timeout_seconds: int = 1800
+    allow_insecure_pb: bool = True
+
+    @classmethod
+    def from_env(cls) -> "ServerSettings":
+        pb_url = validate_pb_url(
+            os.environ.get("GEMINI_PB_URL", "https://pb.any1.tech"),
+            allow_http=True,
+        )
+        keys = tuple(
+            k.strip()
+            for k in os.environ.get("GEMINI_API_KEYS", "").splitlines()
+            if k.strip()
+        )
+        sandbox = (os.environ.get("CODEX_SANDBOX", "workspace-write") or "workspace-write").strip()
+        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+            sandbox = "workspace-write"
+        reviewer = (os.environ.get("CODEX_APPROVALS_REVIEWER", "auto_review") or "auto_review").strip()
+        if reviewer not in {"auto_review", "guardian", "user"}:
+            reviewer = "auto_review"
+        return cls(
+            pb_url=pb_url,
+            pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),
+            pb_email=os.environ.get("GEMINI_PB_EMAIL", "").strip(),
+            pb_password=os.environ.get("GEMINI_PB_PASSWORD", "").strip(),
+            gemini_api_keys=keys,
+            gemini_key_groups=os.environ.get("GEMINI_KEY_GROUPS", "").strip(),
+            server_auth_token=os.environ.get("SERVER_AUTH_TOKEN", "").strip(),
+            max_concurrent_jobs=_parse_int(os.environ.get("MAX_CONCURRENT_JOBS"), 8, minimum=1),
+            recovery_dir=Path(os.environ.get("RECOVERY_DIR", "work/gemini/recovery")),
+            pb_poll_interval_seconds=_parse_float(os.environ.get("PB_POLL_INTERVAL_SECONDS"), 0.0, minimum=0.0),
+            codex_bin=os.environ.get("CODEX_BIN", "codex").strip() or "codex",
+            codex_cwd=os.environ.get("CODEX_CWD", ".").strip() or ".",
+            codex_sandbox=sandbox,
+            codex_approvals_reviewer=reviewer,
+            codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "").strip(),
+            codex_turn_timeout_seconds=_parse_int(os.environ.get("CODEX_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
+        )
