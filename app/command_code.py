@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from difflib import unified_diff
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -18,11 +19,12 @@ from response_capture import sanitize
 
 
 class CommandCodeSession:
-    def __init__(self, process, progress, secret, cwd):
+    def __init__(self, process, progress, secret, cwd, *, shell_enabled=False):
         self.process = process
         self.progress = progress
         self.secrets = (secret,) if secret else ()
         self.cwd = Path(cwd)
+        self.shell_enabled = shell_enabled
         self.session_id = ''
         self.resumed = False
         self.request_id = 0
@@ -59,7 +61,7 @@ class CommandCodeSession:
 
     async def answer(self, method, request_id, params):
         if method == 'session/request_permission' and params.get('sessionId') == self.session_id:
-            allowed = self.can_edit(params)
+            allowed = self.can_use_tool(params)
             kind = 'allow_once' if allowed else 'reject_once'
             option = next((item.get('optionId') for item in params.get('options', [])
                            if item.get('kind') == kind), None)
@@ -68,6 +70,21 @@ class CommandCodeSession:
             await self.send(id=request_id, result={'outcome': outcome})
         else:
             await self.send(id=request_id, error={'code': -32601, 'message': 'Client method unavailable'})
+
+    def can_use_tool(self, params):
+        call = params.get('toolCall') or {}
+        raw = call.get('rawInput')
+        if (self.shell_enabled and call.get('kind') == 'execute' and isinstance(raw, dict)
+                and isinstance(raw.get('command'), str) and isinstance(raw.get('cwd'), str)):
+            return self.in_workspace(raw['cwd'], include_root=True)
+        return self.can_edit(params)
+
+    def in_workspace(self, target, *, include_root=False):
+        try:
+            path = (self.cwd / target).resolve()
+        except (OSError, ValueError, RuntimeError):
+            return False
+        return path.is_relative_to(self.cwd) and (include_root or path != self.cwd)
 
     def can_edit(self, params):
         # Approve only the explicit target of a file edit within the job workspace.
@@ -81,11 +98,7 @@ class CommandCodeSession:
         locations = call.get('locations') or []
         if not isinstance(target, str) or len(locations) != 1 or locations[0].get('path') != target:
             return False
-        try:
-            path = (self.cwd / target).resolve()
-        except (OSError, ValueError, RuntimeError):
-            return False
-        return path != self.cwd and path.is_relative_to(self.cwd)
+        return self.in_workspace(target)
 
     def update(self, update):
         kind = update.get('sessionUpdate')
@@ -147,7 +160,7 @@ class CommandCodeSession:
         reply = sanitize(reply, secrets=self.secrets, text_limit=MAX_REPLY_BYTES, parse_strings=False)
         error = ''
         if not reply and self.denied:
-            error = 'Command Code requested a tool approval that is unavailable in this session'
+            error = 'Command Code could not approve a tool outside its conversation workspace'
         elif stop not in ('end_turn', 'max_tokens', 'max_turn_requests') or not reply:
             error = f'Command Code ended with {stop or "an unknown reason"}' + (': empty response' if not reply else '')
         usage_fields = {'inputTokens': 'promptTokenCount', 'outputTokens': 'candidatesTokenCount',
@@ -228,6 +241,25 @@ async def watch_cancellation(checkpoint):
             return
 
 
+@asynccontextmanager
+async def workspace_lock(cwd, checkpoint):
+    workspace = Path(cwd)
+    with workspace.with_name(f'.{workspace.name}.lock').open('a') as lock:
+        try:
+            async with asyncio.timeout(30):
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if checkpoint is not None and (await checkpoint()).get('canceled'):
+                            raise AgentCanceled('Command Code canceled')
+                        await asyncio.sleep(1)
+        except TimeoutError:
+            raise RuntimeError('The previous Command Code turn is still using this workspace') from None
+        yield
+
+
 async def generate_command_code(job, message, *, checkpoint, progress, settings):
     if extract_image_urls(job, message):
         raise RuntimeError('Command Code currently supports text and Markdown input')
@@ -243,10 +275,19 @@ async def generate_command_code(job, message, *, checkpoint, progress, settings)
     if checkpoint is not None and (await checkpoint()).get('canceled'):
         raise AgentCanceled('Command Code canceled')
 
+    async with workspace_lock(cwd, checkpoint):
+        return await run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings)
+
+
+async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings):
     env = {key: value for key, value in os.environ.items()
            if key in {'PATH', 'HOME', 'LANG', 'TERM', 'TZ', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}
            or key.startswith('LC_')}
     secret = settings.command_code_api_key
+    guard = settings.command_code_shell_guard
+    if guard:
+        env['NODE_OPTIONS'] = '--require=' + guard
+        env['AW_COMMAND_CODE_WORKSPACE'] = cwd
     if secret:
         env['COMMAND_CODE_API_KEY'] = secret
     process = await asyncio.create_subprocess_exec(
@@ -254,7 +295,7 @@ async def generate_command_code(job, message, *, checkpoint, progress, settings)
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         limit=8 * 1024 * 1024,
     )
-    session = CommandCodeSession(process, progress, secret, cwd)
+    session = CommandCodeSession(process, progress, secret, cwd, shell_enabled=bool(guard))
     tasks = []
     try:
         async with asyncio.timeout(30):
@@ -266,18 +307,27 @@ async def generate_command_code(job, message, *, checkpoint, progress, settings)
                 capabilities = info.get('agentCapabilities') or {}
                 supports_resume = 'resume' in (capabilities.get('sessionCapabilities') or {})
                 method = 'session/resume' if supports_resume else 'session/load'
-                await session.request(method, {**params, 'sessionId': previous_id})
+                opened = await session.request(method, {**params, 'sessionId': previous_id})
                 session.session_id = previous_id
                 session.resumed = True
             else:
-                created = await session.request('session/new', params)
-                session.session_id = created.get('sessionId') or ''
+                opened = await session.request('session/new', params)
+                session.session_id = opened.get('sessionId') or ''
             if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session.session_id):
                 raise RuntimeError('Command Code returned an invalid ACP session ID')
             session_settings = {'provider': COMMAND_CODE, 'conversationId': session.session_id, 'workspaceId': workspace_id}
         if checkpoint is not None and (await checkpoint(session_settings)).get('canceled'):
             raise AgentCanceled('Command Code canceled')
 
+        model = (opened.get('models') or {}).get('currentModelId') or next(
+            (option.get('currentValue') for option in opened.get('configOptions', [])
+             if option.get('category') == 'model'), None,
+        )
+        if model and prompt == '/model':
+            return {'reply': f'Command Code · `{model}`', 'error': '', 'finishReason': 'END_TURN',
+                    'protocol': COMMAND_CODE}
+        if model and not prompt.startswith('/'):
+            prompt = f'Host runtime: Command Code. The current configured model is {model}.\n\n{prompt}'
         params = {'sessionId': session.session_id, 'prompt': [{'type': 'text', 'text': prompt}]}
         turn = asyncio.create_task(session.request('session/prompt', params))
         tasks.append(turn)

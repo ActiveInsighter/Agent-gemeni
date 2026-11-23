@@ -16,6 +16,7 @@ Environment=PB_EXECUTOR_QUEUE=command-code
 Environment=PB_POLL_INTERVAL_SECONDS=1.5
 Environment=MAX_CONCURRENT_JOBS=2
 Environment=COMMAND_CODE_BIN=/run/anyworkflow-command-code-cli/dist/index.mjs
+Environment=COMMAND_CODE_SHELL_GUARD=/run/anyworkflow-command-code-app/deploy/command-code-child-process.cjs
 Environment=COMMAND_CODE_CWD=/var/lib/anyworkflow-agent-command-code/workspaces
 Environment=RECOVERY_DIR=/var/lib/anyworkflow-agent-command-code/recovery
 Environment=PYTHONDONTWRITEBYTECODE=1

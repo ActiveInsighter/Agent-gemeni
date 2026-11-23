@@ -54,6 +54,12 @@ else:
             'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}],
         })
         assert json.loads(sys.stdin.readline())['result']['outcome']['optionId'] == expected
+    for req_id, cwd, expected in [(102, str(Path.cwd()), 'allow'), (103, '..', 'deny')]:
+        send(id=req_id, method='session/request_permission', params={
+            'sessionId': 'fixture-1', 'toolCall': {'kind': 'execute', 'rawInput': {'command': 'git status', 'cwd': cwd}},
+            'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}],
+        })
+        assert json.loads(sys.stdin.readline())['result']['outcome']['optionId'] == expected
     update(sessionUpdate='tool_call', toolCallId='edit-1', kind='edit', title='Write: example.txt',
            rawInput={'file_path': 'example.txt'},
            content=[{'type': 'diff', 'path': 'example.txt', 'oldText': 'original', 'newText': 'changed'}])
@@ -78,6 +84,7 @@ class CommandCodeTests(unittest.IsolatedAsyncioTestCase):
         self.settings = ServerSettings(
             pb_url='http://127.0.0.1:8091', command_code_bin=str(launcher),
             command_code_cwd=str(root / 'workspaces'), command_code_api_key='cmd-fixture-key',
+            command_code_shell_guard=str(root / 'fixture-guard.cjs'),
         )
         self.first = {'id': 'a' * 15}
 
