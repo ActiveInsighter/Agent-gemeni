@@ -1,0 +1,41 @@
+[Unit]
+Description=AnyWorkflow Command Code ACP executor
+Wants=network-online.target pocketbase.service
+After=network-online.target pocketbase.service
+
+[Service]
+Type=simple
+User=aw-command-code-agent
+Group=aw-command-code-agent
+StateDirectory=anyworkflow-agent-command-code
+StateDirectoryMode=0700
+EnvironmentFile=/etc/anyworkflow/agent-command-code.env
+Environment=HOME=/var/lib/anyworkflow-agent-command-code
+Environment=PATH=/run/anyworkflow-command-code-node/bin:/usr/local/bin:/usr/bin
+Environment=PB_EXECUTOR_QUEUE=command-code
+Environment=PB_POLL_INTERVAL_SECONDS=1.5
+Environment=MAX_CONCURRENT_JOBS=2
+Environment=COMMAND_CODE_BIN=/run/anyworkflow-command-code-cli/dist/index.mjs
+Environment=COMMAND_CODE_CWD=/var/lib/anyworkflow-agent-command-code/workspaces
+Environment=RECOVERY_DIR=/var/lib/anyworkflow-agent-command-code/recovery
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecCondition=/bin/sh -c 'test -n "$$COMMAND_CODE_API_KEY" || test -s "$$HOME/.commandcode/auth.json"'
+# Bind the deployed checkout, Node runtime and command-code npm package in a drop-in.
+WorkingDirectory=/run/anyworkflow-command-code-app
+ExecStart=/run/anyworkflow-command-code-app/.venv/bin/python -m uvicorn app.server:get_app --factory --host 127.0.0.1 --port 18095 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=4s
+TimeoutStopSec=35s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+ProtectProc=invisible
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
