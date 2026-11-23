@@ -23,7 +23,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecCondition=/bin/sh -c 'test -n "$$COMMAND_CODE_API_KEY" || test -s "$$HOME/.commandcode/auth.json"'
 # Bind the deployed checkout, Node runtime and command-code npm package in a drop-in.
 WorkingDirectory=/run/anyworkflow-command-code-app
-ExecStart=/run/anyworkflow-command-code-app/.venv/bin/python -m uvicorn app.server:get_app --factory --host 127.0.0.1 --port 18095 --workers 1 --no-access-log
+ExecStart=/usr/bin/env /run/anyworkflow-command-code-app/.venv/bin/python -m uvicorn app.server:get_app --factory --host 127.0.0.1 --port 18095 --workers 1 --no-access-log
 Restart=on-failure
 RestartSec=4s
 TimeoutStopSec=35s
