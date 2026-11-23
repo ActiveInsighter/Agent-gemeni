@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 
 
+DEFAULT_AGY_MODEL = "gemini-4-hydrogen"
+
 def _parse_bool(raw: str | None, default: bool = False) -> bool:
     if raw is None or not raw.strip():
         return default
@@ -61,7 +63,7 @@ class ServerSettings:
     codex_turn_timeout_seconds: int = 1800
     agy_bin: str = "agy"
     agy_cwd: str = "work/antigravity-cli/workspaces"
-    agy_default_model: str = ""
+    agy_default_model: str = DEFAULT_AGY_MODEL
     agy_api_key: str = ""
     agy_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
@@ -111,7 +113,7 @@ class ServerSettings:
             codex_turn_timeout_seconds=_parse_int(os.environ.get("CODEX_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             agy_bin=os.environ.get("AGY_BIN", "").strip() or "agy",
             agy_cwd=os.environ.get("AGY_CWD", "").strip() or "work/antigravity-cli/workspaces",
-            agy_default_model=os.environ.get("AGY_DEFAULT_MODEL", "").strip(),
+            agy_default_model=os.environ.get("AGY_DEFAULT_MODEL", DEFAULT_AGY_MODEL).strip(),
             agy_api_key=agy_api_key,
             agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),

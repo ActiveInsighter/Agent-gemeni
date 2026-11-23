@@ -227,8 +227,8 @@ RikkaHub 的 Codex 和 Antigravity CLI 都从 PocketBase 的消息队列领取�
 仓库源代码与执行器会话目录分别维护。
 
 使用 [Google 官方安装程序](https://antigravity.google/download) 下载 `agy`，
-在 `PB_EXECUTOR_QUEUE=agy` 的原生服务中设置 `AGY_BIN`、`AGY_CWD` 和
-`AGY_DEFAULT_MODEL`。生产使用验证过的 `gemini-3.6-flash`。可选
+在 `PB_EXECUTOR_QUEUE=agy` 的原生服务中设置 `AGY_BIN` 和 `AGY_CWD`。
+默认模型为 `gemini-4-hydrogen`，可用 `AGY_DEFAULT_MODEL` 覆盖。可选
 `AGY_GEMINI_API_KEY`，默认取 `GEMINI_API_KEYS` 的第一条。CLI 使用
 [Gemini API Key 模式](https://antigravity.google/docs/cli/install/) 和
 [流式无头模式](https://antigravity.google/docs/cli/headless/)，接收文本与 Markdown，
