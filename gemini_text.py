@@ -285,12 +285,17 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
     if is_codex(job['model']):
         from app.codex_runner import generate_codex
         return await generate_codex(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
-    from app.native_sessions import is_antigravity_cli
+    from app.native_sessions import is_antigravity_cli, is_command_code
     if is_antigravity_cli(job['model']):
         from app.antigravity_cli import generate_antigravity_cli
         if server_settings is None:
             raise RuntimeError('Antigravity CLI jobs require the self-hosted executor')
         return await generate_antigravity_cli(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
+    if is_command_code(job['model']):
+        from app.command_code import generate_command_code
+        if server_settings is None:
+            raise RuntimeError('Command Code jobs require the self-hosted executor')
+        return await generate_command_code(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
     if is_antigravity(job['model']):
         if checkpoint is None:
             raise RuntimeError('Agent requires durable execution state')
@@ -427,7 +432,7 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
 
 async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work_dir: Path, *, fast_pool_factory=None, server_settings=None, timing_basis: str = 'Actions runner wall clock'):
     from app.codex_app_server import is_codex
-    from app.native_sessions import ANTIGRAVITY_CLI, is_antigravity_cli
+    from app.native_sessions import ANTIGRAVITY_CLI, COMMAND_CODE, is_antigravity_cli, is_command_code
     path = f"jobs/{job_id}"
     identity = {"executionId": execution_id}
     model_override = os.environ.get("GEMINI_MODEL", "").strip().removeprefix('models/')
@@ -448,14 +453,16 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     options.setdefault("rpdPerKey", 500)
     options.setdefault("thinkingLevel", "")
     if model_override and model_override.casefold() != job['model'].casefold():
-        if is_antigravity(model_override) or is_antigravity(job['model']) or is_codex(model_override) or is_codex(job['model']):
+        if any(predicate(model) for predicate in (is_antigravity, is_codex, is_command_code)
+               for model in (model_override, job['model'])):
             raise RuntimeError('Agent execution settings must come from the PocketBase job')
         job['model'] = model_override
     if thinking_override:
         options['thinkingLevel'] = thinking_override
     codex = is_codex(job['model'])
     agy = is_antigravity_cli(job['model'])
-    native = codex or agy
+    command_code = is_command_code(job['model'])
+    native = codex or agy or command_code
     if native and server_settings is None:
         raise RuntimeError('CLI jobs require the self-hosted executor')
     antigravity = is_antigravity(job['model'])
@@ -463,6 +470,8 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     pool_keys = pool.keys if pool is not None else ()
     if agy:
         pool_keys = (server_settings.agy_api_key,) if server_settings.agy_api_key else server_settings.gemini_api_keys[:1]
+    if command_code and server_settings.command_code_api_key:
+        pool_keys = (server_settings.command_code_api_key,)
     fast_pool = None
     auxiliary_tasks = set()
     if fast_pool_factory is not None and antigravity:
@@ -480,7 +489,10 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
                 print(f'[agent.fast] task_failed error_type={type(task.exception()).__name__}', flush=True)
         task.add_done_callback(done)
     job_log = AgentTrace(job=job_id, secrets=pool_keys, prefix='[gemini]')
-    protocol = 'codex-app-server' if codex else ANTIGRAVITY_CLI if agy else 'interactions' if antigravity else 'generateContent'
+    protocol = (
+        'codex-app-server' if codex else ANTIGRAVITY_CLI if agy else COMMAND_CODE if command_code
+        else 'interactions' if antigravity else 'generateContent'
+    )
     job_log.emit('job_started', model=job['model'], protocol=protocol,
                  segments=len(job['messages']), concurrency=options['concurrency'])
     queue = asyncio.Queue()

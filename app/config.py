@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import re
 
+from app.native_sessions import COMMAND_CODE
+
 
 DEFAULT_AGY_MODEL = "gemini-4-hydrogen"
 
@@ -67,6 +69,10 @@ class ServerSettings:
     agy_api_key: str = ""
     agy_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
+    command_code_bin: str = "cmd"
+    command_code_cwd: str = "work/command-code/workspaces"
+    command_code_turn_timeout_seconds: int = 1800
+    command_code_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "ServerSettings":
@@ -86,8 +92,8 @@ class ServerSettings:
         if reviewer not in {"auto_review", "guardian_subagent", "user"}:
             reviewer = "user"
         queue = os.environ.get("PB_EXECUTOR_QUEUE", "codex").strip()
-        if queue not in {"codex", "gemini", "agy"}:
-            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini or agy")
+        if queue not in {"codex", "gemini", "agy", COMMAND_CODE}:
+            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini, agy or command-code")
         if queue == "gemini" and not keys:
             raise RuntimeError("GEMINI_API_KEYS is required for the Gemini queue")
         agy_api_key = os.environ.get("AGY_GEMINI_API_KEY", "").strip()
@@ -117,4 +123,8 @@ class ServerSettings:
             agy_api_key=agy_api_key,
             agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
+            command_code_bin=os.environ.get("COMMAND_CODE_BIN", "").strip() or "cmd",
+            command_code_cwd=os.environ.get("COMMAND_CODE_CWD", "").strip() or "work/command-code/workspaces",
+            command_code_turn_timeout_seconds=_parse_int(os.environ.get("COMMAND_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            command_code_api_key=os.environ.get("COMMAND_CODE_API_KEY", "").strip(),
         )
