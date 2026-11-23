@@ -73,6 +73,7 @@ class ServerSettings:
     command_code_cwd: str = "work/command-code/workspaces"
     command_code_turn_timeout_seconds: int = 1800
     command_code_api_key: str = ""
+    command_code_shell_guard: str = ""
 
     @classmethod
     def from_env(cls) -> "ServerSettings":
@@ -127,4 +128,5 @@ class ServerSettings:
             command_code_cwd=os.environ.get("COMMAND_CODE_CWD", "").strip() or "work/command-code/workspaces",
             command_code_turn_timeout_seconds=_parse_int(os.environ.get("COMMAND_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             command_code_api_key=os.environ.get("COMMAND_CODE_API_KEY", "").strip(),
+            command_code_shell_guard=os.environ.get("COMMAND_CODE_SHELL_GUARD", "").strip(),
         )
