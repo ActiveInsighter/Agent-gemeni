@@ -62,7 +62,8 @@ class ClaudeTimeline:
                     self.publish(key, {'type': 'text', 'text': content})
             elif kind == 'tool_use' and block.get('id'):
                 call_id = block['id']
-                self.publish(key, tool_part(block.get('name') or 'tool', call_id, CLAUDE_CODE, input=block.get('input')))
+                name = block.get('name') or 'tool'
+                self.publish(key, tool_part(name, call_id, name, input=block.get('input')))
                 if key in self.parts:
                     self.calls[call_id] = key
             elif kind == 'tool_result' and block.get('tool_use_id') in self.calls:
@@ -71,7 +72,7 @@ class ClaudeTimeline:
                 previous = self.parts.get(tool_key)
                 if previous:
                     self.publish(tool_key, tool_part(
-                        previous['toolName'], call_id, CLAUDE_CODE,
+                        previous['toolName'], call_id, previous['providerType'],
                         input=previous.get('input'), output=block.get('content'),
                         status='failed' if block.get('is_error') else 'completed',
                     ))
