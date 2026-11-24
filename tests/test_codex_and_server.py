@@ -177,6 +177,36 @@ class CodexAndServerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_resumes_the_permitted_thread_in_its_existing_workspace(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "fake_codex.py"
+                script.write_text(FAKE_CODEX_SCRIPT, encoding="utf-8")
+                calls = []
+
+                class RecordingClient(FakeScriptClient):
+                    async def request(self, method, params=None, **kwargs):
+                        calls.append((method, params or {}))
+                        return await super().request(method, params, **kwargs)
+
+                settings = ServerSettings(pb_url="http://127.0.0.1:8090", codex_cwd=tmp,
+                                          codex_approvals_reviewer="auto_review")
+                state = {"provider": "codex", "threadId": "recorded-thread", "workspaceId": "a" * 15}
+                result = await generate_codex({
+                    "model": "Codex", "prompt": "Continue", "history": [{"role": "user", "text": "previous message"}],
+                    "options": {"agent": {"model": "gpt-5.3-codex"}},
+                }, {"id": "b" * 15, "previousProviderState": state}, settings=settings,
+                    client_factory=lambda **kw: RecordingClient(script, **kw))
+                self.assertEqual(result["reply"], "Hello from Codex")
+                methods = dict(calls)
+                self.assertNotIn("thread/start", methods)
+                self.assertEqual(methods["thread/resume"]["threadId"], state["threadId"])
+                self.assertEqual(methods["thread/resume"]["cwd"], str(Path(tmp) / state["workspaceId"]))
+                self.assertEqual(methods["turn/start"]["threadId"], state["threadId"])
+                self.assertEqual(methods["turn/start"]["input"], [{"type": "text", "text": "Continue"}])
+
+        asyncio.run(scenario())
+
     def test_run_job_routes_codex_without_gemini_keys(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
@@ -279,6 +309,56 @@ class CodexAndServerTests(unittest.TestCase):
                 self.assertEqual(len(jobs.json()["jobs"]), 1)
 
             self.assertEqual(len(ran), 1)
+
+    def test_idle_poll_backs_off_and_resets_on_work(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = ServerSettings(
+                    pb_url="http://127.0.0.1:8090",
+                    pb_token="pb-tok",
+                    recovery_dir=Path(tmp) / "rec",
+                    pb_poll_interval_seconds=1.5,
+                    pb_poll_max_interval_seconds=10.0,
+                )
+                queue_calls = {"n": 0}
+
+                class EmptyClient:
+                    async def get(self, *args, **kwargs):
+                        queue_calls["n"] += 1
+                        return httpx.Response(200, json={"items": []})
+
+                executor = JobExecutor(
+                    settings,
+                    run_job_fn=lambda *a, **k: None,
+                    recover_fn=lambda *a, **k: None,
+                    pb_factory=lambda client, root: FakePB({}),
+                    client_factory=EmptyClient,
+                )
+                executor.client = executor._client_factory()
+                executor.pb = FakePB({})
+
+                timeouts = []
+
+                async def fake_wait_for(awaitable, timeout):
+                    timeouts.append(timeout)
+                    if hasattr(awaitable, "close"):
+                        awaitable.close()
+                    if len(timeouts) >= 6:
+                        executor._stop_event.set()
+                    raise asyncio.TimeoutError
+
+                import app.executor as ex
+                orig_wait_for = ex.asyncio.wait_for
+                ex.asyncio.wait_for = fake_wait_for
+                try:
+                    await executor._poll_loop()
+                finally:
+                    ex.asyncio.wait_for = orig_wait_for
+
+                # Idle polls ramp the sleep from the base interval toward the ceiling.
+                self.assertEqual(timeouts[:5], [1.5, 3.0, 6.0, 10.0, 10.0])
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":
