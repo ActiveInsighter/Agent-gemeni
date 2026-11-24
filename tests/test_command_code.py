@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import sys
 import tempfile
@@ -28,6 +29,7 @@ def update(**data):
 assert sys.argv[1:] == ['acp']
 assert os.environ['COMMAND_CODE_API_KEY'] == 'cmd-fixture-key'
 assert 'GEMINI_PB_PASSWORD' not in os.environ
+bypass = 'NODE_OPTIONS' not in os.environ
 req = read('initialize')
 send(id=req['id'], result={'protocolVersion': 1, 'agentCapabilities': {'sessionCapabilities': {'resume': {}}}})
 req = json.loads(sys.stdin.readline())
@@ -41,11 +43,19 @@ else:
     Path('example.txt').write_text('original')
     send(id=req['id'], result={'sessionId': 'fixture-1'})
 
+if bypass:
+    mode = read('session/set_mode')
+    assert mode['params'] == {'sessionId': 'fixture-1', 'modeId': 'bypass'}
+    assert 'AW_COMMAND_CODE_WORKSPACE' not in os.environ
+    send(id=mode['id'], result={})
 prompt = read('session/prompt')
 assert ('Previous conversation:' in prompt['params']['prompt'][0]['text']) == (req['method'] == 'session/new')
 if 'cancel me' in prompt['params']['prompt'][0]['text']:
     read('session/cancel')
     send(id=prompt['id'], result={'stopReason': 'cancelled'})
+elif bypass:
+    update(sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'bypass active'})
+    send(id=prompt['id'], result={'stopReason': 'end_turn'})
 else:
     for req_id, path, expected in [(100, 'example.txt', 'allow'), (101, '../other.txt', 'deny')]:
         send(id=req_id, method='session/request_permission', params={
@@ -112,6 +122,27 @@ class CommandCodeTests(unittest.IsolatedAsyncioTestCase):
             job, {'id': 'b' * 15, 'previousProviderState': states[0]}, **options,
         )
         self.assertEqual(second['reply'], first['reply'])
+        self.assertEqual(states[1], states[0])
+
+    async def test_skip_permissions_on_new_and_resumed_sessions(self):
+        states = []
+
+        async def checkpoint(state=None):
+            if state:
+                states.append(state)
+            return {'canceled': False}
+
+        job = {'prompt': 'question', 'history': [{'role': 'user', 'text': 'prior question'}]}
+        settings = replace(self.settings, command_code_skip_permissions=True)
+        options = dict(checkpoint=checkpoint, progress=None, settings=settings)
+
+        first = await generate_command_code(job, self.first, **options)
+        second = await generate_command_code(
+            job, {'id': 'b' * 15, 'previousProviderState': states[0]}, **options,
+        )
+
+        self.assertEqual(first['reply'], 'bypass active')
+        self.assertEqual(second['reply'], 'bypass active')
         self.assertEqual(states[1], states[0])
 
     async def test_checkpoint_cancellation(self):

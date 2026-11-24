@@ -56,6 +56,7 @@ class ServerSettings:
     max_concurrent_jobs: int = 8
     recovery_dir: Path = Path("work/gemini/recovery")
     pb_poll_interval_seconds: float = 0.0
+    pb_poll_max_interval_seconds: float = 10.0
     pb_executor_queue: str = "codex"
     codex_bin: str = "codex"
     codex_cwd: str = "work/codex/workspaces"
@@ -74,6 +75,7 @@ class ServerSettings:
     command_code_turn_timeout_seconds: int = 1800
     command_code_api_key: str = ""
     command_code_shell_guard: str = ""
+    command_code_skip_permissions: bool = False
 
     @classmethod
     def from_env(cls) -> "ServerSettings":
@@ -111,6 +113,7 @@ class ServerSettings:
             max_concurrent_jobs=_parse_int(os.environ.get("MAX_CONCURRENT_JOBS"), 8, minimum=1),
             recovery_dir=Path(os.environ.get("RECOVERY_DIR", "work/gemini/recovery")),
             pb_poll_interval_seconds=_parse_float(os.environ.get("PB_POLL_INTERVAL_SECONDS"), 0.0, minimum=0.0),
+            pb_poll_max_interval_seconds=_parse_float(os.environ.get("PB_POLL_MAX_INTERVAL_SECONDS"), 10.0, minimum=1.0),
             pb_executor_queue=queue,
             codex_bin=os.environ.get("CODEX_BIN", "codex").strip() or "codex",
             codex_cwd=os.environ.get("CODEX_CWD", "").strip() or "work/codex/workspaces",
@@ -129,4 +132,5 @@ class ServerSettings:
             command_code_turn_timeout_seconds=_parse_int(os.environ.get("COMMAND_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             command_code_api_key=os.environ.get("COMMAND_CODE_API_KEY", "").strip(),
             command_code_shell_guard=os.environ.get("COMMAND_CODE_SHELL_GUARD", "").strip(),
+            command_code_skip_permissions=_parse_bool(os.environ.get("COMMAND_CODE_SKIP_PERMISSIONS")),
         )

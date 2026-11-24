@@ -16,3 +16,5 @@ curl -fsS http://127.0.0.1:18095/health
 ```
 
 正常启动后，健康检查中的 `pb_executor_queue` 为 `command-code`，`pb_polling_ready` 为 `true`。工作区内的文件编辑和终端命令可自动审批。CLI 的子进程在 Linux Landlock 沙箱内运行，能读写此会话的工作目录，并读取编译和运行所需的系统文件。部署终端功能需要 Landlock ABI 6 或更高。输入 `/model` 可以直接查询当前 ACP 会话的实际模型。
+
+自建部署可以在 `/etc/anyworkflow/agent-command-code.env` 设置 `COMMAND_CODE_SKIP_PERMISSIONS=true`。执行器会为新建和续接的 ACP 会话启用 `bypass` 模式，终端子进程也会停用 Landlock 工作区沙箱。实际能访问的主机文件仍由 systemd 和执行器 Linux 账号的权限决定。

@@ -284,7 +284,7 @@ async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, p
            if key in {'PATH', 'HOME', 'LANG', 'TERM', 'TZ', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}
            or key.startswith('LC_')}
     secret = settings.command_code_api_key
-    guard = settings.command_code_shell_guard
+    guard = '' if settings.command_code_skip_permissions else settings.command_code_shell_guard
     if guard:
         env['NODE_OPTIONS'] = '--require=' + guard
         env['AW_COMMAND_CODE_WORKSPACE'] = cwd
@@ -315,6 +315,8 @@ async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, p
                 session.session_id = opened.get('sessionId') or ''
             if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session.session_id):
                 raise RuntimeError('Command Code returned an invalid ACP session ID')
+            if settings.command_code_skip_permissions:
+                await session.request('session/set_mode', {'sessionId': session.session_id, 'modeId': 'bypass'})
             session_settings = {'provider': COMMAND_CODE, 'conversationId': session.session_id, 'workspaceId': workspace_id}
         if checkpoint is not None and (await checkpoint(session_settings)).get('canceled'):
             raise AgentCanceled('Command Code canceled')
