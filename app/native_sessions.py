@@ -4,13 +4,16 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from gemini_agent import strip_image_markers
-
 ANTIGRAVITY_CLI = 'antigravity-cli'
+COMMAND_CODE = 'command-code'
 
 
 def is_antigravity_cli(model: str) -> bool:
     return model.strip().removeprefix('models/').lower() == ANTIGRAVITY_CLI
+
+
+def is_command_code(model: str) -> bool:
+    return model.strip().removeprefix('models/').lower() == COMMAND_CODE
 
 
 def native_session(message, provider: str, root: str, id_field: str) -> tuple[str, str, str]:
@@ -33,6 +36,8 @@ def native_session(message, provider: str, root: str, id_field: str) -> tuple[st
 
 
 def native_prompt(job, message, *, include_history: bool) -> str:
+    from image_attachments import strip_image_markers
+
     chunks = []
     if include_history and isinstance(job.get('history'), list):
         lines = []

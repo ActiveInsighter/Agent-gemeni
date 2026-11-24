@@ -227,8 +227,8 @@ RikkaHub 的 Codex 和 Antigravity CLI 都从 PocketBase 的消息队列领取�
 仓库源代码与执行器会话目录分别维护。
 
 使用 [Google 官方安装程序](https://antigravity.google/download) 下载 `agy`，
-在 `PB_EXECUTOR_QUEUE=agy` 的原生服务中设置 `AGY_BIN`、`AGY_CWD` 和
-`AGY_DEFAULT_MODEL`。生产使用验证过的 `gemini-3.6-flash`。可选
+在 `PB_EXECUTOR_QUEUE=agy` 的原生服务中设置 `AGY_BIN` 和 `AGY_CWD`。
+默认模型为 `gemini-4-hydrogen`，可用 `AGY_DEFAULT_MODEL` 覆盖。可选
 `AGY_GEMINI_API_KEY`，默认取 `GEMINI_API_KEYS` 的第一条。CLI 使用
 [Gemini API Key 模式](https://antigravity.google/docs/cli/install/) 和
 [流式无头模式](https://antigravity.google/docs/cli/headless/)，接收文本与 Markdown，
@@ -236,6 +236,12 @@ RikkaHub 的 Codex 和 Antigravity CLI 都从 PocketBase 的消息队列领取�
 原生服务可使用 [systemd unit](deploy/anyworkflow-agent-antigravity.service)。
 将部署目录只读挂载到 `/run/anyworkflow-antigravity-app`，并在 unit 引用的环境文件
 中配置 PocketBase 地址、服务账号、轮询间隔、`AGY_BIN` 和模型凭据。
+
+CLI 以 `--sandbox` 启动。原生沙盒可用时，可在服务账号的
+`~/.gemini/antigravity-cli/settings.json` 配置
+`"toolPermission": "proceed-in-sandbox"`。本机 Ubuntu 的 AppArmor 设置使
+Google CLI 的终端沙盒不可用，生产服务只预授权精确的 `pwd` 命令以报告
+工作目录。参见 [Google CLI 命令权限](https://antigravity.google/docs/permissions)。
 
 部署顺序为 PocketBase hooks、原生执行器、RikkaHub。PocketBase 复用消息的
 `providerState` JSON 字段。生产部署前核对自建执行队列就绪，
