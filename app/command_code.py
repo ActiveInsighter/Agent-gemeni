@@ -14,11 +14,16 @@ import time
 
 from agent_timeline import MAX_PARTS, bounded_part, tool_part
 from app.native_sessions import COMMAND_CODE, native_prompt, native_session
-from gemini_agent import AgentCanceled, MAX_REPLY_BYTES, extract_image_urls
+from gemini_agent import AgentCanceled, MAX_REPLY_BYTES
+from image_attachments import acp_image_blocks
 from response_capture import sanitize
 
 
 class CommandCodeSession:
+    provider = COMMAND_CODE
+    label = 'Command Code'
+    approval_error = 'Command Code could not approve a tool outside its conversation workspace'
+
     def __init__(self, process, progress, secret, cwd, *, shell_enabled=False):
         self.process = process
         self.progress = progress
@@ -55,9 +60,9 @@ class CommandCodeSession:
             if message.get('id') == request_id:
                 if 'error' in message:
                     error = message['error'].get('message') or 'unknown error'
-                    raise RuntimeError(f'Command Code {method}: {sanitize(error, secrets=self.secrets, text_limit=700)}')
+                    raise RuntimeError(f'{self.label} {method}: {sanitize(error, secrets=self.secrets, text_limit=700)}')
                 return message['result']
-        raise RuntimeError(f'Command Code closed ACP while handling {method}')
+        raise RuntimeError(f'{self.label} closed ACP while handling {method}')
 
     async def answer(self, method, request_id, params):
         if method == 'session/request_permission' and params.get('sessionId') == self.session_id:
@@ -111,7 +116,7 @@ class CommandCodeSession:
             if field == 'text':
                 self.reply_bytes += len(delta.encode())
                 if self.reply_bytes > MAX_REPLY_BYTES:
-                    raise RuntimeError('Command Code reply exceeds 2 MiB')
+                    raise RuntimeError(f'{self.label} reply exceeds 2 MiB')
             last_key = next(reversed(self.parts), None)
             if last_key is not None and self.parts[last_key]['type'] == field:
                 key = last_key
@@ -154,15 +159,15 @@ class CommandCodeSession:
     def result(self, final):
         stop = final.get('stopReason')
         if stop == 'cancelled':
-            raise AgentCanceled('Command Code canceled')
+            raise AgentCanceled(f'{self.label} canceled')
         parts = list(self.parts.values())
         reply = '\n\n'.join(part['text'] for part in parts if part['type'] == 'text').strip()
         reply = sanitize(reply, secrets=self.secrets, text_limit=MAX_REPLY_BYTES, parse_strings=False)
         error = ''
         if not reply and self.denied:
-            error = 'Command Code could not approve a tool outside its conversation workspace'
+            error = self.approval_error
         elif stop not in ('end_turn', 'max_tokens', 'max_turn_requests') or not reply:
-            error = f'Command Code ended with {stop or "an unknown reason"}' + (': empty response' if not reply else '')
+            error = f'{self.label} ended with {stop or "an unknown reason"}' + (': empty response' if not reply else '')
         usage_fields = {'inputTokens': 'promptTokenCount', 'outputTokens': 'candidatesTokenCount',
                         'totalTokens': 'totalTokenCount', 'cachedReadTokens': 'cachedContentTokenCount'}
         raw_usage = (final.get('_meta') or {}).get('usage') or {}
@@ -179,7 +184,7 @@ class CommandCodeSession:
         return {
             'reply': reply, 'error': error, 'finishReason': 'ERROR' if error else stop.upper(),
             'parts': parts,
-            'usage': usage, 'protocol': COMMAND_CODE,
+            'usage': usage, 'protocol': self.provider,
         }
 
 
@@ -260,14 +265,12 @@ async def workspace_lock(cwd, checkpoint):
         yield
 
 
-async def generate_command_code(job, message, *, checkpoint, progress, settings):
-    if extract_image_urls(job, message):
-        raise RuntimeError('Command Code currently supports text and Markdown input')
+async def generate_command_code(job, message, *, checkpoint, progress, settings, images=()):
     previous_id, workspace_id, cwd = native_session(
         message, COMMAND_CODE, settings.command_code_cwd, 'conversationId',
     )
     prompt = native_prompt(job, message, include_history=not previous_id)
-    if not prompt:
+    if not prompt and not images:
         raise RuntimeError('Command Code prompt is empty')
     instructions = str(job.get('systemPrompt') or '').strip()
     if instructions:
@@ -276,10 +279,10 @@ async def generate_command_code(job, message, *, checkpoint, progress, settings)
         raise AgentCanceled('Command Code canceled')
 
     async with workspace_lock(cwd, checkpoint):
-        return await run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings)
+        return await run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings, images)
 
 
-async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings):
+async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, progress, settings, images=()):
     env = {key: value for key, value in os.environ.items()
            if key in {'PATH', 'HOME', 'LANG', 'TERM', 'TZ', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}
            or key.startswith('LC_')}
@@ -296,12 +299,13 @@ async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, p
         limit=8 * 1024 * 1024,
     )
     session = CommandCodeSession(process, progress, secret, cwd, shell_enabled=bool(guard))
-    tasks = []
     try:
         async with asyncio.timeout(30):
             info = await session.request('initialize', {'protocolVersion': 1, 'clientCapabilities': {}})
             if info.get('protocolVersion') != 1:
                 raise RuntimeError('Command Code returned an unsupported ACP version')
+            if images and not (info.get('agentCapabilities') or {}).get('promptCapabilities', {}).get('image'):
+                raise RuntimeError('Command Code ACP does not support image input')
             params = {'cwd': cwd, 'mcpServers': []}
             if previous_id:
                 capabilities = info.get('agentCapabilities') or {}
@@ -325,19 +329,28 @@ async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, p
             (option.get('currentValue') for option in opened.get('configOptions', [])
              if option.get('category') == 'model'), None,
         )
-        if model and prompt == '/model':
+        if model and prompt == '/model' and not images:
             return {'reply': f'Command Code · `{model}`', 'error': '', 'finishReason': 'END_TURN',
                     'protocol': COMMAND_CODE}
         if model and not prompt.startswith('/'):
             prompt = f'Host runtime: Command Code. The current configured model is {model}.\n\n{prompt}'
-        params = {'sessionId': session.session_id, 'prompt': [{'type': 'text', 'text': prompt}]}
+        content = ([{'type': 'text', 'text': prompt}] if prompt else []) + acp_image_blocks(images)
+        return await run_acp_turn(session, content, checkpoint, settings.command_code_turn_timeout_seconds)
+    finally:
+        await stop_acp_process(process)
+
+
+async def run_acp_turn(session, content, checkpoint, timeout):
+    tasks = []
+    try:
+        params = {'sessionId': session.session_id, 'prompt': content}
         turn = asyncio.create_task(session.request('session/prompt', params))
         tasks.append(turn)
         cancellation = None
         if checkpoint is not None:
             cancellation = asyncio.create_task(watch_cancellation(checkpoint))
             tasks.append(cancellation)
-        finished, _ = await asyncio.wait(tasks, timeout=settings.command_code_turn_timeout_seconds,
+        finished, _ = await asyncio.wait(tasks, timeout=timeout,
                                          return_when=asyncio.FIRST_COMPLETED)
         if cancellation in finished or not finished:
             if cancellation in finished:
@@ -347,20 +360,23 @@ async def run_command_code(prompt, cwd, previous_id, workspace_id, checkpoint, p
                     await session.send(method='session/cancel', params={'sessionId': session.session_id})
                     await asyncio.shield(turn)
             if cancellation in finished:
-                raise AgentCanceled('Command Code canceled')
-            raise RuntimeError('Command Code turn timed out')
+                raise AgentCanceled(f'{session.label} canceled')
+            raise RuntimeError(f'{session.label} turn timed out')
         return session.result(turn.result())
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        process.stdin.close()
-        if process.returncode is None:
+
+
+async def stop_acp_process(process):
+    process.stdin.close()
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3)
+        except TimeoutError:
             with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=3)
-            except TimeoutError:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()

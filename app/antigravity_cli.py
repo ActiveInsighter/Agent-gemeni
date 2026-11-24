@@ -5,12 +5,15 @@ import asyncio
 from contextlib import suppress
 import json
 import os
+import re
 import signal
 import time
 
 from agent_timeline import MAX_PARTS, bounded_part, tool_part
+from app.command_code import CommandCodeSession, run_acp_turn, stop_acp_process
 from app.native_sessions import ANTIGRAVITY_CLI, native_prompt, native_session
-from gemini_agent import AgentCanceled, MAX_REPLY_BYTES, extract_image_urls
+from gemini_agent import AgentCanceled, MAX_REPLY_BYTES
+from image_attachments import acp_image_blocks
 from response_capture import sanitize, snapshot
 
 USAGE_FIELDS = {
@@ -22,12 +25,10 @@ USAGE_FIELDS = {
 }
 
 
-async def generate_antigravity_cli(job, message, *, checkpoint, progress, settings):
-    if extract_image_urls(job, message):
-        raise RuntimeError('Antigravity CLI currently supports text and Markdown input')
+async def generate_antigravity_cli(job, message, *, checkpoint, progress, settings, images=()):
     previous_id, workspace_id, cwd = native_session(message, ANTIGRAVITY_CLI, settings.agy_cwd, 'conversationId')
     prompt = native_prompt(job, message, include_history=not previous_id)
-    if not prompt:
+    if not prompt and not images:
         raise RuntimeError('Antigravity CLI prompt is empty')
     instructions = str(job.get('systemPrompt') or '').strip()
     if instructions:
@@ -57,6 +58,12 @@ async def generate_antigravity_cli(job, message, *, checkpoint, progress, settin
     env = {name: value for name, value in os.environ.items()
            if name in {'PATH', 'HOME', 'LANG', 'TERM', 'TZ', 'SSL_CERT_FILE', 'SSL_CERT_DIR'} or name.startswith('LC_')}
     env['GEMINI_API_KEY'] = key
+    state = message.get('previousProviderState') or {}
+    if images or state.get('transport') == 'acp':
+        return await run_antigravity_acp(
+            prompt, images, cwd, previous_id, workspace_id, model, effort, schema, env,
+            key, checkpoint, progress, settings,
+        )
     if await is_canceled(checkpoint):
         raise AgentCanceled('Antigravity CLI canceled')
     proc = await asyncio.create_subprocess_exec(
@@ -158,6 +165,84 @@ async def generate_antigravity_cli(job, message, *, checkpoint, progress, settin
                 await proc.wait()
         stderr_task.cancel()
         await asyncio.gather(stderr_task, return_exceptions=True)
+
+
+class AntigravityAcpSession(CommandCodeSession):
+    provider = ANTIGRAVITY_CLI
+    label = 'Antigravity CLI'
+    approval_error = 'Antigravity CLI could not get tool approval in headless mode'
+
+    def can_use_tool(self, params):
+        return False
+
+
+async def run_antigravity_acp(
+    prompt, images, cwd, previous_id, workspace_id, model, effort, schema, env,
+    key, checkpoint, progress, settings,
+):
+    if await is_canceled(checkpoint):
+        raise AgentCanceled('Antigravity CLI canceled')
+    if isinstance(schema, dict):
+        raise RuntimeError('Antigravity CLI ACP cannot enforce a JSON output schema')
+    process = await asyncio.create_subprocess_exec(
+        settings.agy_bin, 'acp', '--sandbox', cwd=cwd, env=env, start_new_session=True,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        limit=8 * 1024 * 1024,
+    )
+    session = AntigravityAcpSession(process, progress, key, cwd)
+    try:
+        async with asyncio.timeout(30):
+            info = await session.request('initialize', {'protocolVersion': 1, 'clientCapabilities': {}})
+            capabilities = info.get('agentCapabilities') or {}
+            if info.get('protocolVersion') != 1 or (images and not capabilities.get('promptCapabilities', {}).get('image')):
+                raise RuntimeError('Antigravity CLI ACP does not support image input')
+            await session.request('authenticate', {'methodId': 'gemini-api-key'})
+            params = {'cwd': cwd, 'mcpServers': []}
+            if previous_id:
+                resume_params = {**params, 'sessionId': previous_id}
+                try:
+                    opened = await session.request('session/resume', resume_params)
+                except RuntimeError as error:
+                    if 'load it with session/load' not in str(error):
+                        raise
+                    opened = await session.request('session/load', resume_params)
+                session.session_id = previous_id
+                session.resumed = True
+            else:
+                opened = await session.request('session/new', params)
+                session.session_id = opened.get('sessionId') or ''
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session.session_id):
+                raise RuntimeError('Antigravity CLI returned an invalid ACP session ID')
+            config = opened.get('configOptions') or []
+            if model:
+                available = (opened.get('models') or {}).get('availableModels') or []
+                if any(entry.get('modelId') == model for entry in available):
+                    await session.request('session/set_model', {'sessionId': session.session_id, 'modelId': model})
+                else:
+                    updated = await session.request('session/set_config_option', {
+                        'sessionId': session.session_id, 'configId': 'model', 'value': model,
+                    })
+                    config = updated.get('configOptions') or config
+            levels = ('low', 'medium', 'high', 'xhigh', 'max')
+            if effort in levels:
+                options = next((entry.get('options') or [] for entry in config
+                                if entry.get('id') == 'thought_level'), [])
+                offered = {entry.get('value') for entry in options}
+                if offered and effort not in offered:
+                    effort = min((level for level in levels if level in offered),
+                                 key=lambda level: abs(levels.index(level) - levels.index(effort)),
+                                 default=effort)
+                await session.request('session/set_config_option', {
+                    'sessionId': session.session_id, 'configId': 'thought_level', 'value': effort,
+                })
+        state = {'provider': ANTIGRAVITY_CLI, 'conversationId': session.session_id,
+                 'workspaceId': workspace_id, 'transport': 'acp'}
+        if await is_canceled(checkpoint, state):
+            raise AgentCanceled('Antigravity CLI canceled')
+        content = ([{'type': 'text', 'text': prompt}] if prompt else []) + acp_image_blocks(images)
+        return await run_acp_turn(session, content, checkpoint, settings.agy_turn_timeout_seconds)
+    finally:
+        await stop_acp_process(process)
 
 
 def normalized_usage(raw):

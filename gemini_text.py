@@ -1,6 +1,6 @@
 """Bounded text-only Gemini fan-out. PocketBase owns inputs and every saved reply.
 
-No Files API, OCR, image requests or PDF transcription rules are used here.
+Chat jobs can attach images from the shared R2 library.
 A saved result retries only its PB write, never the paid generation. A second
 Actions attempt cannot re-claim a partially executed job and silently resend it.
 """
@@ -23,17 +23,19 @@ from response_capture import extract_structured_payload, generate_content_snapsh
 from agent_timeline import prepare_result, wire_row
 from gemini_agent import (
     AgentCanceled,
-    extract_image_urls,
     generate_agent,
     is_antigravity,
-    resolve_images_to_base64,
-    strip_image_markers,
 )
 from agent_fast_tasks import AgentSummaryWorker, AgentTimingTracker, maybe_generate_title
 from agent_trace import AgentTrace
 from agent_progress import MessageProgress
 
+from image_attachments import (
+    external_image_rejected, extract_image_urls, image_mime, resolve_images_to_base64, strip_image_markers,
+)
+
 MAX_REPLY_BYTES = 2 * 1024 * 1024
+
 TOKEN_FIELDS = {
     'input_tokens': 'promptTokenCount', 'output_tokens': 'candidatesTokenCount',
     'thought_tokens': 'thoughtsTokenCount', 'cached_tokens': 'cachedContentTokenCount',
@@ -113,14 +115,21 @@ def normalize_thinking_level(raw: str | None) -> str:
     return _THINKING_LEVEL_ALIASES.get(value, value)
 
 
-def build_payload(job: dict, message: dict, *, resolved_images=None) -> dict:
+def build_payload(job: dict, message: dict, *, resolved_images=None, turn_images=None) -> dict:
+    def attached_parts(urls):
+        if resolved_images is None:
+            return [{"fileData": {"mimeType": image_mime(url), "fileUri": url}} for url in urls]
+        return [{"inlineData": {"mimeType": resolved_images[url][0], "data": resolved_images[url][1]}}
+                for url in urls]
+
+    history_images, current_images = turn_images or ([], [])
+
     parts = [
         {"text": stripped}
         for value in (job.get("prompt", ""), message.get("inputText", ""))
         if (stripped := strip_image_markers(value))
     ]
-    for mime_type, b64_data in (resolved_images or ()):
-        parts.append({"inlineData": {"mimeType": mime_type, "data": b64_data}})
+    parts.extend(attached_parts(current_images))
     options = job.get("options") or {}
     model = str(job.get("model") or "").strip()
     model_lower = model.lower()
@@ -167,8 +176,12 @@ def build_payload(job: dict, message: dict, *, resolved_images=None) -> dict:
         payload['tools'] = options['tools']
     if job.get('history'):
         payload['contents'] = [
-            {'role': turn['role'], 'parts': [{'text': strip_image_markers(turn['text'])}]}
-            for turn in job['history']
+            {'role': turn['role'], 'parts': turn_parts}
+            for index, turn in enumerate(job['history'])
+            if (turn_parts := (
+                ([{'text': text}] if (text := strip_image_markers(turn['text'])) else [])
+                + attached_parts(history_images[index] if history_images else [])
+            ))
         ] + payload['contents']
     if job.get("systemPrompt"):
         payload["systemInstruction"] = {"parts": [{"text": job["systemPrompt"]}]}
@@ -282,28 +295,37 @@ class PocketBase:
 
 async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoint=None, progress=None, pb=None, timing=None, server_settings=None) -> dict:
     from app.codex_app_server import is_codex
-    if is_codex(job['model']):
-        from app.codex_runner import generate_codex
-        return await generate_codex(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
     from app.native_sessions import is_antigravity_cli, is_command_code
-    if is_antigravity_cli(job['model']):
+    model = job['model']
+    if any(route(model) for route in (is_codex, is_antigravity_cli, is_command_code)):
+        images = await resolve_images_to_base64(client, extract_image_urls(job, message))
+    if is_codex(model):
+        from app.codex_runner import generate_codex
+        return await generate_codex(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings, images=images)
+    if is_antigravity_cli(model):
         from app.antigravity_cli import generate_antigravity_cli
         if server_settings is None:
             raise RuntimeError('Antigravity CLI jobs require the self-hosted executor')
-        return await generate_antigravity_cli(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
+        return await generate_antigravity_cli(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings, images=images)
     if is_command_code(job['model']):
         from app.command_code import generate_command_code
         if server_settings is None:
             raise RuntimeError('Command Code jobs require the self-hosted executor')
-        return await generate_command_code(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings)
+        return await generate_command_code(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings, images=images)
     if is_antigravity(job['model']):
         if checkpoint is None:
             raise RuntimeError('Agent requires durable execution state')
         return await generate_agent(client, pool, job, message, checkpoint=checkpoint, sleep=sleep, progress=progress, pb=pb, timing=timing)
     provider = GeminiProvider()
-    image_urls = extract_image_urls(job, message)
-    resolved_images = await resolve_images_to_base64(client, image_urls) if image_urls else []
-    payload = build_payload(job, message, resolved_images=resolved_images)
+    history_images = [
+        extract_image_urls(turn, {'inputText': turn['text']}) if turn['role'] == 'user' else []
+        for turn in job.get('history', [])
+    ]
+    turn_images = history_images, extract_image_urls(job, message)
+    image_urls = list(dict.fromkeys(url for urls in (*history_images, turn_images[1]) for url in urls))
+    use_links = bool(image_urls) and model.lower().startswith(('gemini-2.5', 'gemini-3', 'gemini-4'))
+    resolved = None if use_links else dict(zip(image_urls, await resolve_images_to_base64(client, image_urls)))
+    payload = build_payload(job, message, resolved_images=resolved, turn_images=turn_images)
     last_http_error = ''
     last_data = {}
     for attempt in range(4):
@@ -330,6 +352,11 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
                         accumulated_parts = []
                         merged_candidate = {}
                         async for chunk, _, _ in sse_events(response):
+                            if use_links and not accumulated_parts and isinstance(chunk.get('error'), dict):
+                                code = chunk['error'].get('code')
+                                if type(code) is int and code >= 400:
+                                    status, data = code, chunk
+                                    break
                             candidate = (chunk.get('candidates') or [{}])[0]
                             for mkey in ('index', 'finishReason', 'finishMessage', 'safetyRatings',
                                          'citationMetadata', 'groundingMetadata', 'urlContextMetadata',
@@ -377,7 +404,8 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
                                         mapped = 'toolUseTokenCount' if k == 'toolUsePromptTokenCount' else k
                                         if mapped in TOKEN_FIELDS.values() and isinstance(v, int) and v >= 0:
                                             progress.usage[mapped] = v
-                        data['candidates'] = [{**merged_candidate, 'content': {'parts': accumulated_parts}}]
+                        if status == 200:
+                            data['candidates'] = [{**merged_candidate, 'content': {'parts': accumulated_parts}}]
                         if progress is not None:
                             for part_index, part in enumerate(accumulated_parts):
                                 if isinstance(part.get('text'), str):
@@ -407,6 +435,15 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
         if status == 200:
             await pool.mark_success(index, lease)
             return parse_answer(data, secrets=pool.keys)
+        scope = provider.credential_error_scope(status, data)
+        if use_links and attempt < 3 and external_image_rejected(status, data, scope):
+            # A rejected media URI can be retried with inline data. Timeouts
+            # and accepted streams must never cause a duplicate model request.
+            await pool.mark_cancelled(index, lease)
+            use_links = False
+            resolved = dict(zip(image_urls, await resolve_images_to_base64(client, image_urls)))
+            payload = build_payload(job, message, resolved_images=resolved, turn_images=turn_images)
+            continue
         last_data = data
         error_code = safe_error_code(data)
         last_http_error = (f"Gemini 拒绝请求（HTTP {status}，错误类型 {error_code}），"
@@ -414,7 +451,6 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
         print(f'[gemini] upstream_http={status} error_code={error_code} '
               f'model={job["model"]}', flush=True)
         await pool.mark_error(index, lease, http_status=status)
-        scope = provider.credential_error_scope(status, data)
         if scope == "key":
             pool.retire_key(index, "invalid credential")
         elif scope == "bucket":

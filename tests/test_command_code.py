@@ -31,7 +31,7 @@ assert os.environ['COMMAND_CODE_API_KEY'] == 'cmd-fixture-key'
 assert 'GEMINI_PB_PASSWORD' not in os.environ
 bypass = 'NODE_OPTIONS' not in os.environ
 req = read('initialize')
-send(id=req['id'], result={'protocolVersion': 1, 'agentCapabilities': {'sessionCapabilities': {'resume': {}}}})
+send(id=req['id'], result={'protocolVersion': 1, 'agentCapabilities': {'sessionCapabilities': {'resume': {}}, 'promptCapabilities': {'image': True}}})
 req = json.loads(sys.stdin.readline())
 assert req['params']['cwd'] == str(Path.cwd())
 if req['method'] == 'session/resume':
@@ -49,6 +49,8 @@ if bypass:
     assert 'AW_COMMAND_CODE_WORKSPACE' not in os.environ
     send(id=mode['id'], result={})
 prompt = read('session/prompt')
+if 'inspect attachment' in prompt['params']['prompt'][0]['text']:
+    assert prompt['params']['prompt'][1:] == [{'type': 'image', 'mimeType': 'image/png', 'data': 'aW1hZ2U='}]
 assert ('Previous conversation:' in prompt['params']['prompt'][0]['text']) == (req['method'] == 'session/new')
 if 'cancel me' in prompt['params']['prompt'][0]['text']:
     read('session/cancel')
@@ -160,3 +162,11 @@ class CommandCodeTests(unittest.IsolatedAsyncioTestCase):
                 {'prompt': 'cancel me', 'history': [{'role': 'user', 'text': 'prior'}]},
                 self.first, checkpoint=checkpoint, progress=None, settings=self.settings,
             )
+
+    async def test_image_is_sent_as_an_acp_content_block(self):
+        result = await generate_command_code(
+            {'prompt': 'inspect attachment', 'history': [{'role': 'user', 'text': 'prior'}]},
+            self.first, checkpoint=None, progress=None, settings=self.settings,
+            images=[('image/png', 'aW1hZ2U=')],
+        )
+        self.assertEqual(result['reply'], 'answer [REDACTED]')

@@ -62,6 +62,7 @@ async def generate_codex(
     progress: MessageProgress | None = None,
     settings: ServerSettings | None = None,
     client_factory=None,
+    images=(),
 ) -> dict[str, Any]:
     cfg = settings or ServerSettings.from_env()
     factory = client_factory or CodexAppServerClient
@@ -118,7 +119,7 @@ async def generate_codex(
             )
 
         prompt = native_prompt(job, message, include_history=not resumed)
-        if not prompt:
+        if not prompt and not images:
             raise RuntimeError("Codex prompt is empty")
 
         if checkpoint is not None and (await checkpoint()).get("canceled"):
@@ -130,6 +131,7 @@ async def generate_codex(
             model=model,
             effort=effort,
             output_schema=output_schema,
+            **({"images": tuple(images)} if images else {}),
         )
 
         if checkpoint is not None:
