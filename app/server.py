@@ -63,6 +63,8 @@ def create_app(
             "gemini_keys_configured": len(cfg.gemini_api_keys),
             "pb_executor_queue": cfg.pb_executor_queue,
             "pb_polling_enabled": cfg.pb_poll_interval_seconds > 0,
+            "pb_poll_interval_seconds": cfg.pb_poll_interval_seconds,
+            "pb_poll_max_interval_seconds": cfg.pb_poll_max_interval_seconds,
             "pb_polling_ready": exec_instance.poll_ready,
         }
 

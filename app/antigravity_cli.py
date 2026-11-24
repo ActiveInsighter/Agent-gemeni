@@ -38,8 +38,9 @@ async def generate_antigravity_cli(job, message, *, checkpoint, progress, settin
     effort = options.get('thinkingLevel')
     args = [
         settings.agy_bin, '--input-format', 'stream-json', '--output-format', 'stream-json',
-        '--sandbox', '--disable-slash-commands', '--print-timeout', f'{settings.agy_turn_timeout_seconds}s',
+        '--disable-slash-commands', '--print-timeout', f'{settings.agy_turn_timeout_seconds}s',
     ]
+    args.append('--dangerously-skip-permissions' if settings.agy_skip_permissions else '--sandbox')
     if previous_id:
         args.extend(('--conversation', previous_id))
     if model:

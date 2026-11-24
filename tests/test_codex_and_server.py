@@ -310,6 +310,56 @@ class CodexAndServerTests(unittest.TestCase):
 
             self.assertEqual(len(ran), 1)
 
+    def test_idle_poll_backs_off_and_resets_on_work(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = ServerSettings(
+                    pb_url="http://127.0.0.1:8090",
+                    pb_token="pb-tok",
+                    recovery_dir=Path(tmp) / "rec",
+                    pb_poll_interval_seconds=1.5,
+                    pb_poll_max_interval_seconds=10.0,
+                )
+                queue_calls = {"n": 0}
+
+                class EmptyClient:
+                    async def get(self, *args, **kwargs):
+                        queue_calls["n"] += 1
+                        return httpx.Response(200, json={"items": []})
+
+                executor = JobExecutor(
+                    settings,
+                    run_job_fn=lambda *a, **k: None,
+                    recover_fn=lambda *a, **k: None,
+                    pb_factory=lambda client, root: FakePB({}),
+                    client_factory=EmptyClient,
+                )
+                executor.client = executor._client_factory()
+                executor.pb = FakePB({})
+
+                timeouts = []
+
+                async def fake_wait_for(awaitable, timeout):
+                    timeouts.append(timeout)
+                    if hasattr(awaitable, "close"):
+                        awaitable.close()
+                    if len(timeouts) >= 6:
+                        executor._stop_event.set()
+                    raise asyncio.TimeoutError
+
+                import app.executor as ex
+                orig_wait_for = ex.asyncio.wait_for
+                ex.asyncio.wait_for = fake_wait_for
+                try:
+                    await executor._poll_loop()
+                finally:
+                    ex.asyncio.wait_for = orig_wait_for
+
+                # Idle polls ramp the sleep from the base interval toward the ceiling.
+                self.assertEqual(timeouts[:5], [1.5, 3.0, 6.0, 10.0, 10.0])
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -194,8 +194,11 @@ class JobExecutor:
 
     async def _poll_loop(self) -> None:
         assert self.client is not None and self.pb is not None
-        interval = max(1.0, self.settings.pb_poll_interval_seconds)
+        base = max(1.0, self.settings.pb_poll_interval_seconds)
+        ceiling = max(base, self.settings.pb_poll_max_interval_seconds)
+        interval = base
         while not self._stop_event.is_set():
+            picked = 0
             try:
                 resp = await self.client.get(
                     f"{self.settings.pb_url}/api/anyworkflow/gemini/{self.settings.pb_executor_queue}/queue",
@@ -213,14 +216,22 @@ class JobExecutor:
                     jid = str(item.get("id") or "")
                     if JOB_ID_RE.fullmatch(jid) and jid not in self._active_tasks:
                         self.submit_job(jid)
+                        picked += 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.poll_ready = False
                 code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 print(f"[server.poller] poll_error error_type={type(exc).__name__} status={code}", flush=True)
+                idle = True
+            else:
+                # Back off whenever nothing new was claimed: an idle queue, or
+                # one we cannot drain because every slot is busy. Any pick-up
+                idle = picked == 0
+            wait_interval = interval
+            interval = min(ceiling, interval * 2) if idle else base
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_interval)
             except asyncio.TimeoutError:
                 pass
 
