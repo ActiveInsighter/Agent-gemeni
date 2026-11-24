@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 
-from app.native_sessions import COMMAND_CODE
+from app.native_sessions import CLAUDE_CODE, COMMAND_CODE
 
 
 DEFAULT_AGY_MODEL = "gemini-4-hydrogen"
@@ -70,6 +70,11 @@ class ServerSettings:
     agy_api_key: str = ""
     agy_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
+    claude_code_bin: str = "claude"
+    claude_code_cwd: str = "work/claude-code/workspaces"
+    claude_code_turn_timeout_seconds: int = 1800
+    modelflare_claude_key: str = ""
+    modelflare_gpt_key: str = ""
     command_code_bin: str = "cmd"
     command_code_cwd: str = "work/command-code/workspaces"
     command_code_turn_timeout_seconds: int = 1800
@@ -94,13 +99,17 @@ class ServerSettings:
         if reviewer not in {"auto_review", "guardian_subagent", "user"}:
             reviewer = "user"
         queue = os.environ.get("PB_EXECUTOR_QUEUE", "codex").strip()
-        if queue not in {"codex", "gemini", "agy", COMMAND_CODE}:
-            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini, agy or command-code")
+        if queue not in {"codex", "gemini", "agy", COMMAND_CODE, CLAUDE_CODE}:
+            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini, agy, command-code or claude-code")
         if queue == "gemini" and not keys:
             raise RuntimeError("GEMINI_API_KEYS is required for the Gemini queue")
         agy_api_key = os.environ.get("AGY_GEMINI_API_KEY", "").strip()
         if queue == "agy" and not (agy_api_key or keys):
             raise RuntimeError("AGY_GEMINI_API_KEY or GEMINI_API_KEYS is required for the Antigravity CLI queue")
+        claude_key = os.environ.get("MODELFLARE_CLAUDE_KEY", "").strip()
+        gpt_key = os.environ.get("MODELFLARE_GPT_KEY", "").strip()
+        if queue == CLAUDE_CODE and not (claude_key and gpt_key):
+            raise RuntimeError("The Claude Code queue requires both ModelFlare keys")
         return cls(
             pb_url=pb_url,
             pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),
@@ -126,6 +135,11 @@ class ServerSettings:
             agy_api_key=agy_api_key,
             agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
+            claude_code_bin=os.environ.get("CLAUDE_CODE_BIN", "").strip() or "claude",
+            claude_code_cwd=os.environ.get("CLAUDE_CODE_CWD", "").strip() or "work/claude-code/workspaces",
+            claude_code_turn_timeout_seconds=_parse_int(os.environ.get("CLAUDE_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            modelflare_claude_key=claude_key,
+            modelflare_gpt_key=gpt_key,
             command_code_bin=os.environ.get("COMMAND_CODE_BIN", "").strip() or "cmd",
             command_code_cwd=os.environ.get("COMMAND_CODE_CWD", "").strip() or "work/command-code/workspaces",
             command_code_turn_timeout_seconds=_parse_int(os.environ.get("COMMAND_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),

@@ -1,0 +1,38 @@
+[Unit]
+Description=AnyWorkflow Claude Code executor
+Wants=network-online.target pocketbase.service
+After=network-online.target pocketbase.service
+
+[Service]
+Type=simple
+User=aw-claude-code-agent
+Group=aw-claude-code-agent
+StateDirectory=anyworkflow-agent-claude-code
+StateDirectoryMode=0700
+EnvironmentFile=/etc/anyworkflow/agent-claude-code.env
+Environment=HOME=/var/lib/anyworkflow-agent-claude-code
+Environment=PB_EXECUTOR_QUEUE=claude-code
+Environment=PB_POLL_INTERVAL_SECONDS=1.5
+Environment=MAX_CONCURRENT_JOBS=2
+Environment=CLAUDE_CODE_BIN=/usr/local/bin/claude
+Environment=CLAUDE_CODE_CWD=/var/lib/anyworkflow-agent-claude-code/workspaces
+Environment=RECOVERY_DIR=/var/lib/anyworkflow-agent-claude-code/recovery
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/opt/anyworkflow-agent-claude-code
+ExecStart=/opt/anyworkflow-agent-claude-code/.venv/bin/python -m uvicorn app.server:get_app --factory --host 127.0.0.1 --port 18096 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=4s
+TimeoutStopSec=35s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

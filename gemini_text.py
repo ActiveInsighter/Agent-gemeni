@@ -295,9 +295,9 @@ class PocketBase:
 
 async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoint=None, progress=None, pb=None, timing=None, server_settings=None) -> dict:
     from app.codex_app_server import is_codex
-    from app.native_sessions import is_antigravity_cli, is_command_code
+    from app.native_sessions import is_antigravity_cli, is_claude_code, is_command_code
     model = job['model']
-    if any(route(model) for route in (is_codex, is_antigravity_cli, is_command_code)):
+    if any(route(model) for route in (is_codex, is_antigravity_cli, is_claude_code, is_command_code)):
         images = await resolve_images_to_base64(client, extract_image_urls(job, message))
     if is_codex(model):
         from app.codex_runner import generate_codex
@@ -307,7 +307,12 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
         if server_settings is None:
             raise RuntimeError('Antigravity CLI jobs require the self-hosted executor')
         return await generate_antigravity_cli(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings, images=images)
-    if is_command_code(job['model']):
+    if is_claude_code(model):
+        from app.claude_code import generate_claude_code
+        if server_settings is None:
+            raise RuntimeError('Claude Code jobs require the self-hosted executor')
+        return await generate_claude_code(job, message, checkpoint=checkpoint, progress=progress, settings=server_settings, images=images)
+    if is_command_code(model):
         from app.command_code import generate_command_code
         if server_settings is None:
             raise RuntimeError('Command Code jobs require the self-hosted executor')
@@ -468,7 +473,7 @@ async def generate(client, pool, job, message, *, sleep=asyncio.sleep, checkpoin
 
 async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work_dir: Path, *, fast_pool_factory=None, server_settings=None, timing_basis: str = 'Actions runner wall clock'):
     from app.codex_app_server import is_codex
-    from app.native_sessions import ANTIGRAVITY_CLI, COMMAND_CODE, is_antigravity_cli, is_command_code
+    from app.native_sessions import ANTIGRAVITY_CLI, CLAUDE_CODE, COMMAND_CODE, is_antigravity_cli, is_claude_code, is_command_code
     path = f"jobs/{job_id}"
     identity = {"executionId": execution_id}
     model_override = os.environ.get("GEMINI_MODEL", "").strip().removeprefix('models/')
@@ -489,7 +494,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     options.setdefault("rpdPerKey", 500)
     options.setdefault("thinkingLevel", "")
     if model_override and model_override.casefold() != job['model'].casefold():
-        if any(predicate(model) for predicate in (is_antigravity, is_codex, is_command_code)
+        if any(predicate(model) for predicate in (is_antigravity, is_codex, is_claude_code, is_command_code)
                for model in (model_override, job['model'])):
             raise RuntimeError('Agent execution settings must come from the PocketBase job')
         job['model'] = model_override
@@ -498,7 +503,8 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
     codex = is_codex(job['model'])
     agy = is_antigravity_cli(job['model'])
     command_code = is_command_code(job['model'])
-    native = codex or agy or command_code
+    claude_code = is_claude_code(job['model'])
+    native = codex or agy or command_code or claude_code
     if native and server_settings is None:
         raise RuntimeError('CLI jobs require the self-hosted executor')
     antigravity = is_antigravity(job['model'])
@@ -508,6 +514,8 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
         pool_keys = (server_settings.agy_api_key,) if server_settings.agy_api_key else server_settings.gemini_api_keys[:1]
     if command_code and server_settings.command_code_api_key:
         pool_keys = (server_settings.command_code_api_key,)
+    if claude_code:
+        pool_keys = tuple(filter(None, (server_settings.modelflare_claude_key, server_settings.modelflare_gpt_key)))
     fast_pool = None
     auxiliary_tasks = set()
     if fast_pool_factory is not None and antigravity:
@@ -526,7 +534,7 @@ async def run_job(pb, client, job_id: str, execution_id: str, pool_factory, work
         task.add_done_callback(done)
     job_log = AgentTrace(job=job_id, secrets=pool_keys, prefix='[gemini]')
     protocol = (
-        'codex-app-server' if codex else ANTIGRAVITY_CLI if agy else COMMAND_CODE if command_code
+        'codex-app-server' if codex else ANTIGRAVITY_CLI if agy else COMMAND_CODE if command_code else CLAUDE_CODE if claude_code
         else 'interactions' if antigravity else 'generateContent'
     )
     job_log.emit('job_started', model=job['model'], protocol=protocol,

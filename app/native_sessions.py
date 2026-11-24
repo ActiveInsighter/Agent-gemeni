@@ -6,6 +6,7 @@ import re
 
 ANTIGRAVITY_CLI = 'antigravity-cli'
 COMMAND_CODE = 'command-code'
+CLAUDE_CODE = 'claude-code'
 
 
 def is_antigravity_cli(model: str) -> bool:
@@ -14,6 +15,10 @@ def is_antigravity_cli(model: str) -> bool:
 
 def is_command_code(model: str) -> bool:
     return model.strip().removeprefix('models/').lower() == COMMAND_CODE
+
+
+def is_claude_code(model: str) -> bool:
+    return model.strip().removeprefix('models/').lower() == CLAUDE_CODE
 
 
 def native_session(message, provider: str, root: str, id_field: str) -> tuple[str, str, str]:
