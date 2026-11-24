@@ -22,111 +22,15 @@ from agent_trace import AgentTrace, TERMINAL
 from response_capture import extract_structured_payload, interaction_snapshot
 from agent_runtime import GUIDE, mount_runtime
 from github_context import is_project_task, task_text
+from image_attachments import (
+    external_image_rejected, extract_image_urls, image_mime, resolve_images_to_base64, strip_image_markers,
+)
 
 ROOT = 'https://generativelanguage.googleapis.com/v1beta/interactions'
 DEFAULT_AGENT = 'antigravity-preview-09-2026'
 DEFAULT_MODEL = 'gemini-4-hydrogen'
 MAX_RESPONSE_BYTES = 6 * 1024 * 1024
 MAX_REPLY_BYTES = 2 * 1024 * 1024
-MAX_IMAGE_BYTES = 25 * 1024 * 1024
-
-_IMAGE_MARKER_RE = re.compile(r'\n?<!--\s*aw:images:(\[.*?\])\s*-->', re.DOTALL)
-_EXT_TO_MIME = {
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.webp': 'image/webp',
-    '.gif': 'image/gif',
-}
-
-
-def strip_image_markers(text: str) -> str:
-    if not text:
-        return ''
-    return _IMAGE_MARKER_RE.sub('', text).strip()
-
-
-def extract_image_urls(job: dict, message: dict) -> list[str]:
-    urls: list[str] = []
-    seen: set[str] = set()
-
-    def add_url(raw):
-        if isinstance(raw, dict):
-            raw = raw.get('url') or raw.get('sourceUrl') or ''
-        if not isinstance(raw, str):
-            return
-        value = raw.strip()
-        if not value or value in seen:
-            return
-        if value.startswith(('http://', 'https://', 'data:image/')):
-            seen.add(value)
-            urls.append(value)
-
-    for container in (job, message):
-        if not isinstance(container, dict):
-            continue
-        raw_images = container.get('images')
-        if isinstance(raw_images, list):
-            for item in raw_images:
-                add_url(item)
-    for text in (
-        (job or {}).get('prompt', '') if isinstance(job, dict) else '',
-        (message or {}).get('inputText', '') if isinstance(message, dict) else '',
-    ):
-        if not isinstance(text, str) or 'aw:images:' not in text:
-            continue
-        for match in _IMAGE_MARKER_RE.finditer(text):
-            try:
-                parsed = json.loads(match.group(1))
-                if isinstance(parsed, list):
-                    for item in parsed:
-                        add_url(item)
-            except ValueError:
-                pass
-    return urls
-
-
-def _infer_image_mime(url: str, content_type: str | None) -> str:
-    ct = (content_type or '').split(';', 1)[0].strip().lower()
-    if ct == 'image/jpg':
-        return 'image/jpeg'
-    if ct.startswith('image/'):
-        return ct
-    path_lower = url.split('?', 1)[0].split('#', 1)[0].lower()
-    for ext, mime in _EXT_TO_MIME.items():
-        if path_lower.endswith(ext):
-            return mime
-    return 'image/png'
-
-
-async def _download_single_image(client: httpx.AsyncClient, url: str, timeout: float) -> tuple[str, str]:
-    if url.startswith('data:image/'):
-        header, _, b64 = url.partition(',')
-        mime = header[5:].split(';', 1)[0].strip().lower() or 'image/png'
-        if not b64:
-            raise RuntimeError('图片 data URL 内容为空')
-        return mime, b64
-    resp = await client.get(url, timeout=timeout, follow_redirects=True)
-    if resp.status_code != 200:
-        raise RuntimeError(f'下载图片失败 (HTTP {resp.status_code})')
-    content = resp.content
-    if not content:
-        raise RuntimeError('下载的图片内容为空')
-    if len(content) > MAX_IMAGE_BYTES:
-        raise RuntimeError('图片大小超过 25 MiB 限制')
-    mime = _infer_image_mime(url, resp.headers.get('content-type'))
-    return mime, base64.b64encode(content).decode('ascii')
-
-
-async def resolve_images_to_base64(
-    client: httpx.AsyncClient,
-    urls: list[str],
-    *,
-    timeout: float = 15.0,
-) -> list[tuple[str, str]]:
-    if not urls:
-        return []
-    return list(await asyncio.gather(*(_download_single_image(client, url, timeout) for url in urls)))
 
 
 def agent_telemetry(event, **fields):
@@ -228,7 +132,7 @@ async def resolve_previous_agent_context(pb, job):
         return {}
 
 
-def build_agent_payload(job, message, *, environment_id=None, previous_interaction_id=None, resolved_images=None):
+def build_agent_payload(job, message, *, environment_id=None, previous_interaction_id=None, resolved_images=None, image_urls=()):
     options = job.get('options', {}).get('agent', {})
     name = str(job['model']).lower()
     reused_env = str(environment_id or '').strip() or None
@@ -239,11 +143,13 @@ def build_agent_payload(job, message, *, environment_id=None, previous_interacti
     if not prev_interaction:
         input_parts = [*[f"{turn['role']}: {strip_image_markers(turn['text'])}" for turn in job.get('history', [])], *input_parts]
     combined_text = '\n\n'.join(value for value in input_parts if value)
-    if resolved_images:
+    if image_urls or resolved_images:
         agent_input = []
         if combined_text:
             agent_input.append({'type': 'text', 'text': combined_text})
-        for mime_type, b64_data in resolved_images:
+        for url in image_urls:
+            agent_input.append({'type': 'image', 'mime_type': image_mime(url), 'uri': url})
+        for mime_type, b64_data in resolved_images or ():
             agent_input.append({'type': 'image', 'mime_type': mime_type, 'data': b64_data})
     else:
         agent_input = combined_text
@@ -485,11 +391,12 @@ async def generate_agent(client, pool, job, message, *, checkpoint, sleep=asynci
         telemetry('environment_fallback', reason='credential_missing')
         reusing_remote = False
     image_urls = [] if resumed else extract_image_urls(job, message)
-    resolved_images = await resolve_images_to_base64(client, image_urls) if image_urls else []
+    resolved_images = []
+    use_image_links = bool(image_urls)
     payload = build_agent_payload(job, message,
         environment_id=context['environment_id'] if reusing_remote else None,
         previous_interaction_id=context['previous_interaction_id'] if reusing_remote else None,
-        resolved_images=resolved_images)
+        image_urls=image_urls)
     input_chars = (len(payload['input']) if isinstance(payload['input'], str)
                    else sum(len(item.get('text', '')) for item in payload['input'] if isinstance(item, dict)))
     telemetry('prepared',
@@ -498,7 +405,7 @@ async def generate_agent(client, pool, job, message, *, checkpoint, sleep=asynci
         github_enabled=bool(os.environ.get('ANTIGRAVITY_GITHUB_TOKEN', '').strip()),
         github_mcp_enabled=any(tool.get('type') == 'mcp_server' for tool in payload['tools']),
         input_chars=input_chars,
-        image_count=len(resolved_images),
+        image_count=len(image_urls),
         system_chars=len(payload.get('system_instruction', '')),
         resumed=resumed,
         reused_environment=isinstance(payload.get('environment'), str),
@@ -530,16 +437,31 @@ async def generate_agent(client, pool, job, message, *, checkpoint, sleep=asynci
             trace.emit('create_http', http=status, seconds=round(clock() - create_started, 3),
                        attempt=attempt + 1, instruction_retry=instruction_retry,
                        **({'error': trace.preview(data['error'])} if data.get('error') else {}))
-            if instruction_retry or not reusing_remote or status != 400:
-                break
-            corrected = await restore_parent_system_instruction(client, key, payload, data.get('error'))
-            if corrected is None:
+            corrected = None
+            if not instruction_retry and reusing_remote and status == 400:
+                corrected = await restore_parent_system_instruction(client, key, payload, data.get('error'))
+            if corrected is not None:
+                payload = corrected
+                instruction_retry = True
+            elif use_image_links and external_image_rejected(
+                status, data, provider.credential_error_scope(status, data),
+            ):
+                try:
+                    resolved_images = await resolve_images_to_base64(client, image_urls)
+                except BaseException:
+                    await pool.mark_cancelled(index, lease)
+                    raise
+                inline = iter(resolved_images)
+                payload = {**payload, 'input': [
+                    {'type': 'image', 'mime_type': item['mime_type'], 'data': next(inline)[1]}
+                    if item['type'] == 'image' else item for item in payload['input']
+                ]}
+                use_image_links = False
+            else:
                 break
             if (await checkpoint()).get('canceled'):
                 await pool.mark_cancelled(index, lease)
                 raise AgentCanceled('Agent 已取消，未创建远程执行。')
-            payload = corrected
-            instruction_retry = True
         if status in [200, 201, 202]:
             current = data
             if not isinstance(data.get('id'), str) or not data['id']:
@@ -565,7 +487,8 @@ async def generate_agent(client, pool, job, message, *, checkpoint, sleep=asynci
             reusing_remote = False
             await pool.mark_cancelled(index, lease)
             telemetry('environment_fallback', reason='upstream_rejected', http=status)
-            payload = build_agent_payload(job, message, resolved_images=resolved_images)
+            payload = build_agent_payload(job, message, resolved_images=resolved_images,
+                                          image_urls=image_urls if use_image_links else ())
             continue
         await pool.mark_error(index, lease, http_status=status)
         scope = provider.credential_error_scope(status, data)
