@@ -213,6 +213,40 @@ Gemini 领取并等待本机任务结束，再启用工作流和 Cloudflare 的 
 自建服务在任务结束前保存结果以便重启补写。对已领取但没有可补写回复的任务，重启时按
 原执行身份结束该任务。后续消息可使用 PocketBase 保存的对话上下文。
 
+## CLI 会话和工作目录
+
+RikkaHub 的 Codex 和 Antigravity CLI 都从 PocketBase 的消息队列领取任务。
+同一对话中的单条跟进使用父消息保存的原生会话 ID。Codex 调用
+`thread/resume`，Antigravity CLI 调用 `agy --conversation`。分支、批量分段
+及切换执行器时使用已保存的对话记录创建会话。
+
+工作目录由服务端分配。每个原生会话使用一个独立的持久化子目录，续接时沿用。
+生产主机分别使用 `/var/lib/anyworkflow-agent-codex/workspaces` 和
+`/var/lib/anyworkflow-agent-antigravity/workspaces`。Codex 登录态和会话文件仍使用
+原有的 `CODEX_HOME`。Google CLI 会话文件保存在 Antigravity CLI 服务账号的 HOME。
+仓库源代码与执行器会话目录分别维护。
+
+使用 [Google 官方安装程序](https://antigravity.google/download) 下载 `agy`，
+在 `PB_EXECUTOR_QUEUE=agy` 的原生服务中设置 `AGY_BIN` 和 `AGY_CWD`。
+默认模型为 `gemini-4-hydrogen`，可用 `AGY_DEFAULT_MODEL` 覆盖。可选
+`AGY_GEMINI_API_KEY`，默认取 `GEMINI_API_KEYS` 的第一条。CLI 使用
+[Gemini API Key 模式](https://antigravity.google/docs/cli/install/) 和
+[流式无头模式](https://antigravity.google/docs/cli/headless/)，接收文本与 Markdown，
+通过现有进度和结果接口回写。托管 Antigravity 继续使用 Interactions API。
+原生服务可使用 [systemd unit](deploy/anyworkflow-agent-antigravity.service)。
+将部署目录只读挂载到 `/run/anyworkflow-antigravity-app`，并在 unit 引用的环境文件
+中配置 PocketBase 地址、服务账号、轮询间隔、`AGY_BIN` 和模型凭据。
+
+CLI 以 `--sandbox` 启动。原生沙盒可用时，可在服务账号的
+`~/.gemini/antigravity-cli/settings.json` 配置
+`"toolPermission": "proceed-in-sandbox"`。本机 Ubuntu 的 AppArmor 设置使
+Google CLI 的终端沙盒不可用，生产服务只预授权精确的 `pwd` 命令以报告
+工作目录。参见 [Google CLI 命令权限](https://antigravity.google/docs/permissions)。
+
+部署顺序为 PocketBase hooks、原生执行器、RikkaHub。PocketBase 复用消息的
+`providerState` JSON 字段。生产部署前核对自建执行队列就绪，
+部署后通过同一会话的两条消息验证回复内容和原生会话 ID。
+
 ## Antigravity Agent 消息
 
 `gemini_text.py` 对 `Antigravity`（大小写不敏感）和 `antigravity-*` 使用

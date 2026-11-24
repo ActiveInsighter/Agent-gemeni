@@ -6,6 +6,10 @@ import os
 from pathlib import Path
 import re
 
+from app.native_sessions import COMMAND_CODE
+
+
+DEFAULT_AGY_MODEL = "gemini-4-hydrogen"
 
 def _parse_bool(raw: str | None, default: bool = False) -> bool:
     if raw is None or not raw.strip():
@@ -55,12 +59,22 @@ class ServerSettings:
     pb_poll_max_interval_seconds: float = 10.0
     pb_executor_queue: str = "codex"
     codex_bin: str = "codex"
-    codex_cwd: str = "."
+    codex_cwd: str = "work/codex/workspaces"
     codex_sandbox: str = "workspace-write"
     codex_approvals_reviewer: str = "user"
     codex_default_model: str = ""
     codex_turn_timeout_seconds: int = 1800
+    agy_bin: str = "agy"
+    agy_cwd: str = "work/antigravity-cli/workspaces"
+    agy_default_model: str = DEFAULT_AGY_MODEL
+    agy_api_key: str = ""
+    agy_turn_timeout_seconds: int = 1800
     allow_insecure_pb: bool = True
+    command_code_bin: str = "cmd"
+    command_code_cwd: str = "work/command-code/workspaces"
+    command_code_turn_timeout_seconds: int = 1800
+    command_code_api_key: str = ""
+    command_code_shell_guard: str = ""
 
     @classmethod
     def from_env(cls) -> "ServerSettings":
@@ -80,10 +94,13 @@ class ServerSettings:
         if reviewer not in {"auto_review", "guardian_subagent", "user"}:
             reviewer = "user"
         queue = os.environ.get("PB_EXECUTOR_QUEUE", "codex").strip()
-        if queue not in {"codex", "gemini"}:
-            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex or gemini")
+        if queue not in {"codex", "gemini", "agy", COMMAND_CODE}:
+            raise RuntimeError("PB_EXECUTOR_QUEUE must be codex, gemini, agy or command-code")
         if queue == "gemini" and not keys:
             raise RuntimeError("GEMINI_API_KEYS is required for the Gemini queue")
+        agy_api_key = os.environ.get("AGY_GEMINI_API_KEY", "").strip()
+        if queue == "agy" and not (agy_api_key or keys):
+            raise RuntimeError("AGY_GEMINI_API_KEY or GEMINI_API_KEYS is required for the Antigravity CLI queue")
         return cls(
             pb_url=pb_url,
             pb_token=os.environ.get("POCKETBASE_SERVER_TOKEN", "").strip(),
@@ -98,10 +115,20 @@ class ServerSettings:
             pb_poll_max_interval_seconds=_parse_float(os.environ.get("PB_POLL_MAX_INTERVAL_SECONDS"), 10.0, minimum=1.0),
             pb_executor_queue=queue,
             codex_bin=os.environ.get("CODEX_BIN", "codex").strip() or "codex",
-            codex_cwd=os.environ.get("CODEX_CWD", ".").strip() or ".",
+            codex_cwd=os.environ.get("CODEX_CWD", "").strip() or "work/codex/workspaces",
             codex_sandbox=sandbox,
             codex_approvals_reviewer=reviewer,
             codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "").strip(),
             codex_turn_timeout_seconds=_parse_int(os.environ.get("CODEX_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            agy_bin=os.environ.get("AGY_BIN", "").strip() or "agy",
+            agy_cwd=os.environ.get("AGY_CWD", "").strip() or "work/antigravity-cli/workspaces",
+            agy_default_model=os.environ.get("AGY_DEFAULT_MODEL", DEFAULT_AGY_MODEL).strip(),
+            agy_api_key=agy_api_key,
+            agy_turn_timeout_seconds=_parse_int(os.environ.get("AGY_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
             allow_insecure_pb=_parse_bool(os.environ.get("ALLOW_INSECURE_PB"), True),
+            command_code_bin=os.environ.get("COMMAND_CODE_BIN", "").strip() or "cmd",
+            command_code_cwd=os.environ.get("COMMAND_CODE_CWD", "").strip() or "work/command-code/workspaces",
+            command_code_turn_timeout_seconds=_parse_int(os.environ.get("COMMAND_CODE_TURN_TIMEOUT_SECONDS"), 1800, minimum=30),
+            command_code_api_key=os.environ.get("COMMAND_CODE_API_KEY", "").strip(),
+            command_code_shell_guard=os.environ.get("COMMAND_CODE_SHELL_GUARD", "").strip(),
         )

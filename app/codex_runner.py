@@ -2,58 +2,21 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Any
 
 from agent_progress import MessageProgress
 from app.codex_app_server import (
     CodexAppServerClient,
+    CodexRpcError,
     map_thinking_to_codex_effort,
     resolve_codex_model,
 )
 from app.config import ServerSettings
 from app.codex_timeline import CodexTimeline
-from gemini_agent import AgentCanceled, MAX_REPLY_BYTES, strip_image_markers
+from app.native_sessions import native_prompt, native_session
+from gemini_agent import AgentCanceled, MAX_REPLY_BYTES
 from response_capture import snapshot
-
-
-def _extract_previous_thread_id(job: dict[str, Any], message: dict[str, Any]) -> str:
-    for container in (message, job):
-        if not isinstance(container, dict):
-            continue
-        for key in ("previousProviderState", "providerState"):
-            state = container.get(key)
-            if isinstance(state, str):
-                try:
-                    state = json.loads(state)
-                except ValueError:
-                    state = None
-            if isinstance(state, dict):
-                tid = str(state.get("threadId") or "").strip()
-                if tid:
-                    return tid
-    return ""
-
-
-def _build_codex_prompt(job: dict[str, Any], message: dict[str, Any], *, include_history: bool) -> str:
-    chunks: list[str] = []
-    if include_history and isinstance(job.get("history"), list) and job["history"]:
-        history_lines: list[str] = []
-        for turn in job["history"]:
-            if not isinstance(turn, dict):
-                continue
-            role = str(turn.get("role") or "user").strip().upper()
-            text = strip_image_markers(str(turn.get("text") or ""))
-            if text:
-                history_lines.append(f"[{role}]\n{text}")
-        if history_lines:
-            chunks.append("Previous conversation:\n" + "\n\n".join(history_lines))
-    for value in (job.get("prompt", ""), message.get("inputText", "")):
-        stripped = strip_image_markers(str(value or ""))
-        if stripped:
-            chunks.append(stripped)
-    return "\n\n".join(chunks).strip()
 
 
 def _extract_usage(turn: dict[str, Any], params: dict[str, Any]) -> dict[str, int]:
@@ -99,6 +62,7 @@ async def generate_codex(
     progress: MessageProgress | None = None,
     settings: ServerSettings | None = None,
     client_factory=None,
+    images=(),
 ) -> dict[str, Any]:
     cfg = settings or ServerSettings.from_env()
     factory = client_factory or CodexAppServerClient
@@ -110,11 +74,11 @@ async def generate_codex(
     if not isinstance(output_schema, dict):
         output_schema = None
 
-    prev_thread_id = _extract_previous_thread_id(job, message)
+    prev_thread_id, workspace_id, cwd = native_session(message, 'codex', cfg.codex_cwd, 'threadId')
 
     async with factory(
         codex_bin=cfg.codex_bin,
-        cwd=cfg.codex_cwd,
+        cwd=cwd,
         auto_approve=(cfg.codex_approvals_reviewer != "user"),
     ) as codex:
         if not model or effort in {"none", "minimal"}:
@@ -139,21 +103,23 @@ async def generate_codex(
                     sandbox=cfg.codex_sandbox,
                 )
                 resumed = bool(thread_id)
-            except Exception:
-                thread_id = ""
-                resumed = False
+            except CodexRpcError as error:
+                if not any(text in error.rpc_message.lower() for text in (
+                    'no rollout found', 'thread not found', 'no thread found',
+                )):
+                    raise
 
         if not thread_id:
             thread_id = await codex.thread_start(
                 model=model,
-                cwd=cfg.codex_cwd,
+                cwd=cwd,
                 sandbox=cfg.codex_sandbox,
                 approvals_reviewer=cfg.codex_approvals_reviewer,
                 base_instructions=system_prompt,
             )
 
-        prompt = _build_codex_prompt(job, message, include_history=not resumed)
-        if not prompt:
+        prompt = native_prompt(job, message, include_history=not resumed)
+        if not prompt and not images:
             raise RuntimeError("Codex prompt is empty")
 
         if checkpoint is not None and (await checkpoint()).get("canceled"):
@@ -165,10 +131,11 @@ async def generate_codex(
             model=model,
             effort=effort,
             output_schema=output_schema,
+            **({"images": tuple(images)} if images else {}),
         )
 
         if checkpoint is not None:
-            cp = await checkpoint({"provider": "codex", "threadId": thread_id, "turnId": turn_id})
+            cp = await checkpoint({"provider": "codex", "threadId": thread_id, "turnId": turn_id, "workspaceId": workspace_id})
             if isinstance(cp, dict) and cp.get("canceled"):
                 await codex.turn_interrupt(thread_id, turn_id)
                 raise AgentCanceled("Codex turn canceled")

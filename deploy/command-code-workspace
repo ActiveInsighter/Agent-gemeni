@@ -1,0 +1,82 @@
+#!/usr/bin/python3 -I
+"""Restrict Command Code child processes to their workspace with Linux Landlock."""
+import ctypes
+import os
+from pathlib import Path
+import sys
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+CREATE_RULESET, ADD_RULE, RESTRICT_SELF = 444, 445, 446
+PR_SET_NO_NEW_PRIVS = 38
+EXECUTE, WRITE, READ_FILE, READ_DIR = (1 << bit for bit in range(4))
+READ = EXECUTE | READ_FILE | READ_DIR
+# ABI 6 includes REFER, TRUNCATE, SIGNAL and ABSTRACT_UNIX_SOCKET scope.
+FILESYSTEM_RIGHTS = (1 << 15) - 1
+
+
+class Ruleset(ctypes.Structure):
+    _fields_ = [('handled_access_fs', ctypes.c_uint64), ('handled_access_net', ctypes.c_uint64),
+                ('scoped', ctypes.c_uint64)]
+
+
+class PathRule(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [('allowed_access', ctypes.c_uint64), ('parent_fd', ctypes.c_int32)]
+
+
+def checked(result):
+    if result < 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number))
+    return result
+
+
+def allow(ruleset, path, rights):
+    try:
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return
+    try:
+        if not Path(path).is_dir():
+            rights &= EXECUTE | READ_FILE | WRITE | (1 << 14)  # TRUNCATE
+        rule = PathRule(rights, fd)
+        checked(LIBC.syscall(ADD_RULE, ruleset, 1, ctypes.byref(rule), 0))
+    finally:
+        os.close(fd)
+
+
+def main():
+    if os.uname().machine not in ('x86_64', 'aarch64'):
+        raise OSError('unsupported Landlock architecture')
+    workspace = Path(os.environ.pop('AW_COMMAND_CODE_WORKSPACE')).resolve(strict=True)
+    if not Path.cwd().resolve().is_relative_to(workspace):
+        raise PermissionError('command working directory is outside the conversation workspace')
+    if checked(LIBC.syscall(CREATE_RULESET, 0, 0, 1)) < 6:
+        raise OSError('Landlock ABI 6 or newer is required')
+    attributes = Ruleset(FILESYSTEM_RIGHTS, 0, 3)
+    ruleset = checked(LIBC.syscall(CREATE_RULESET, ctypes.byref(attributes), ctypes.sizeof(attributes), 0))
+    try:
+        allow(ruleset, workspace, FILESYSTEM_RIGHTS)
+        for path in ('/usr', '/bin', '/lib', '/lib64',
+                     '/run/anyworkflow-command-code-node', '/run/anyworkflow-command-code-cli',
+                     '/etc/ssl', '/etc/ca-certificates', '/etc/ld.so.cache',
+                     '/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf',
+                     '/etc/passwd', '/etc/group', '/etc/bash.bashrc', '/etc/localtime', '/dev/urandom', '/dev/random'):
+            allow(ruleset, path, READ)
+        allow(ruleset, '/dev/null', READ_FILE | WRITE)
+        checked(LIBC.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+        checked(LIBC.syscall(RESTRICT_SELF, ruleset, 0))
+    finally:
+        os.close(ruleset)
+    env = {key: value for key, value in os.environ.items()
+           if key in {'PATH', 'LANG', 'TERM', 'TZ'} or key.startswith('LC_')}
+    env.update(HOME=str(workspace), TMPDIR=str(workspace), SHELL='/bin/bash')
+    os.execvpe(sys.argv[1], sys.argv[1:], env)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, KeyError) as error:
+        print(f'Command Code workspace sandbox: {error}', file=sys.stderr)
+        sys.exit(126)
