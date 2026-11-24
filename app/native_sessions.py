@@ -36,7 +36,7 @@ def native_session(message, provider: str, root: str, id_field: str) -> tuple[st
 
 
 def native_prompt(job, message, *, include_history: bool) -> str:
-    from gemini_agent import strip_image_markers
+    from image_attachments import strip_image_markers
 
     chunks = []
     if include_history and isinstance(job.get('history'), list):

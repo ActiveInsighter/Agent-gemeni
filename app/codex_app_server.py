@@ -367,10 +367,14 @@ class CodexAppServerClient:
         model: str = "",
         effort: str | None = None,
         output_schema: dict[str, Any] | None = None,
+        images: tuple[tuple[str, str], ...] = (),
     ) -> str:
         params: dict[str, Any] = {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": prompt}],
+            "input": [
+                *([{"type": "text", "text": prompt}] if prompt else []),
+                *({"type": "image", "url": f"data:{mime};base64,{data}"} for mime, data in images),
+            ],
         }
         if model:
             params["model"] = model
