@@ -62,8 +62,8 @@ class WorkflowProviderContractTests(unittest.TestCase):
 
     def test_svg_figure_rewriting_is_removed(self):
         workflow = WORKFLOW.read_text()
-        self.assertNotIn(' --svg', workflow)
-        self.assertNotIn('svg', workflow.lower())
+        self.assertNotIn('--svg', workflow)
+        self.assertNotIn('svg-config', workflow)
 
 
 if __name__ == "__main__":

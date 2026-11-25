@@ -138,6 +138,14 @@ class BatchFramingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_args(args)
 
+    def test_image_config_ignores_legacy_svg_settings(self):
+        args = parser().parse_args([
+            '--source-url', 'https://example.com/a.pdf',
+            '--image-config', '{"jpeg_quality":90,"svg":{"enabled":true,"model":"gemini-3.5-flash-lite"}}',
+        ])
+        validate_args(args)
+        self.assertEqual(args.jpeg_quality, 90)
+
     def test_reject_duplicate_reordered_unknown_empty_and_unframed_pages(self):
         pages = [Page(n, Path('unused'), str(n)) for n in [7, 8]]
         for text in ['text', '<!-- 第 7 页 -->a<!-- 第 7 页 -->b',

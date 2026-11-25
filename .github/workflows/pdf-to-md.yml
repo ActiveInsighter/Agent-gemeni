@@ -106,7 +106,7 @@ on:
           - png
           - jpeg
       image_config:
-        description: 'Image options JSON: {"jpeg_quality":95}'
+        description: 'Image options JSON: {"jpeg_quality":95}. Legacy svg settings are accepted and ignored.'
         required: false
         default: ""
         type: string

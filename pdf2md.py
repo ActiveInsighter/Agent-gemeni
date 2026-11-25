@@ -1329,7 +1329,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", default="output",
                    help="Dedicated generated artifact directory; cleared on each run.")
     p.add_argument("--image-config", default="",
-                   help="JSON image options for workflow dispatch ({jpeg_quality}).")
+                   help="JSON image options for workflow dispatch ({jpeg_quality}); svg settings are ignored.")
     return p
 
 
@@ -1338,12 +1338,13 @@ def _parse_image_config(args: argparse.Namespace) -> dict:
     if not raw:
         return {}
     data = json.loads(raw)
-    if not isinstance(data, dict) or data.keys() - {"jpeg_quality"}:
-        raise ValueError("image_config must contain only jpeg_quality")
+    if not isinstance(data, dict):
+        raise ValueError("image_config must be a JSON object")
     if "jpeg_quality" in data and (type(data["jpeg_quality"]) is not int
                                    or not 50 <= data["jpeg_quality"] <= 100):
         raise ValueError("image_config.jpeg_quality must be an integer between 50 and 100")
-    return data
+    # Legacy dispatchers still send svg settings; SVG rewriting is gone.
+    return {"jpeg_quality": data["jpeg_quality"]} if "jpeg_quality" in data else {}
 
 
 def validate_args(args: argparse.Namespace) -> None:
