@@ -106,7 +106,7 @@ on:
           - png
           - jpeg
       image_config:
-        description: 'Image options JSON: {"jpeg_quality":95,"svg":{"enabled":true,"provider":"gemini","model":"gemini-3.5-flash-lite"}}'
+        description: 'Image options JSON: {"jpeg_quality":95}'
         required: false
         default: ""
         type: string
